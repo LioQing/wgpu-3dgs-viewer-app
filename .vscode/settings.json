@@ -1,0 +1,9 @@
+{
+    "editor.formatOnSave": true,
+    "editor.rulers": [
+        100
+    ],
+    "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.cargo.features": "all",
+}
