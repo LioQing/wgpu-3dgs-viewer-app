@@ -1,10 +1,12 @@
 use egui::ahash::HashMap;
 use strum::{EnumCount, EnumIter, IntoEnumIterator};
 
+mod camera;
 mod scene;
 mod transform;
 
 use crate::app;
+use camera::Camera;
 use scene::Scene;
 use transform::Transform;
 
@@ -24,6 +26,7 @@ use transform::Transform;
 pub enum Type {
     Scene,
     Transform,
+    Camera,
 }
 
 impl Type {
@@ -32,6 +35,7 @@ impl Type {
         match self {
             Self::Scene => "Scene",
             Self::Transform => "Transform",
+            Self::Camera => "Camera",
         }
     }
 }
@@ -163,6 +167,7 @@ impl Viewer<'_> {
         self.tabs.entry(tab).or_insert_with(|| match tab {
             Type::Scene => Box::new(Scene::create(self.state)) as Box<dyn Tab>,
             Type::Transform => Box::new(Transform::create(self.state)) as Box<dyn Tab>,
+            Type::Camera => Box::new(Camera::create(self.state)) as Box<dyn Tab>,
         });
     }
 }

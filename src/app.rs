@@ -131,6 +131,7 @@ impl eframe::App for App {
 /// The state of the main application.
 #[derive(Debug, Default)]
 pub struct State {
+    /// The Gaussian splatting model, which can be loaded from a file.
     pub gs: Loadable<GaussianSplatting, gs::Error>,
 }
 
@@ -175,36 +176,34 @@ impl<T, E> Default for Loadable<T, E> {
 }
 
 /// The Gaussian splatting model.
-pub type GaussianSplatting = GaussianSplattingData;
-
-/// The Gaussian splatting model data.
 #[derive(Debug)]
-pub struct GaussianSplattingData {
+pub struct GaussianSplatting {
+    /// The file name of the opened Gaussian splatting model.
     pub file_name: String,
-    pub camera: gs::Camera,
+
+    /// The camera to view the model.
+    pub camera: Camera,
+
+    /// The Gaussians parsed from the model.
     pub gaussians: gs::Gaussians,
-    pub transform: GaussianSplattingTransform,
+
+    /// The model transform.
+    pub model_transform: GaussianSplattingModelTransform,
+
+    /// The Gaussian transform.
+    pub gaussian_transform: GaussianSplattingGaussianTransform,
 }
 
-impl GaussianSplattingData {
+impl GaussianSplatting {
     /// Create a Gaussian splatting model from a PLY file.
     pub fn new(file_name: String, ply: &mut impl BufRead) -> Result<Self, gs::Error> {
-        let transform = GaussianSplattingTransform::new();
+        let gaussian_transform = GaussianSplattingGaussianTransform::new();
+
+        let model_transform = GaussianSplattingModelTransform::new();
 
         let gaussians = gs::Gaussians::read_ply(ply)?;
 
-        let mut camera = gs::Camera::new(1e-4..1e4, 60f32.to_radians());
-        camera.pos = gaussians
-            .gaussians
-            .iter()
-            .map(|g| transform.quat() * g.pos)
-            .sum::<Vec3>()
-            / gaussians.gaussians.len() as f32;
-        camera.pos.z += gaussians
-            .gaussians
-            .iter()
-            .map(|g| (transform.quat() * g.pos).z - camera.pos.z)
-            .fold(f32::INFINITY, |a, b| a.min(b));
+        let camera = Camera::new(&gaussians, &model_transform);
 
         log::info!("Gaussian splatting model loaded");
 
@@ -212,14 +211,15 @@ impl GaussianSplattingData {
             file_name,
             camera,
             gaussians,
-            transform,
+            model_transform,
+            gaussian_transform,
         })
     }
 }
 
 /// The Gaussian splatting model transform.
 #[derive(Debug, Clone)]
-pub struct GaussianSplattingTransform {
+pub struct GaussianSplattingModelTransform {
     /// The position.
     pub pos: Vec3,
 
@@ -230,24 +230,105 @@ pub struct GaussianSplattingTransform {
     pub scale: Vec3,
 }
 
-impl GaussianSplattingTransform {
+impl GaussianSplattingModelTransform {
     /// Create a new Gaussian splatting model transform.
     pub const fn new() -> Self {
         Self {
             pos: Vec3::ZERO,
-            rot: Vec3::new(0.0, 0.0, std::f32::consts::PI),
+            rot: Vec3::new(0.0, 0.0, 180.0),
             scale: Vec3::ONE,
         }
     }
 
     /// Get the rotation in quaternion.
     pub fn quat(&self) -> Quat {
-        Quat::from_euler(EulerRot::ZYX, self.rot.z, self.rot.y, self.rot.x)
+        Quat::from_euler(
+            EulerRot::ZYX,
+            self.rot.z.to_radians(),
+            self.rot.y.to_radians(),
+            self.rot.x.to_radians(),
+        )
     }
 }
 
-impl Default for GaussianSplattingTransform {
+impl Default for GaussianSplattingModelTransform {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The Gaussian splatting Gaussian transform.
+#[derive(Debug, Clone)]
+pub struct GaussianSplattingGaussianTransform {
+    /// The size.
+    pub size: f32,
+
+    /// The display mode.
+    pub display_mode: gs::GaussianDisplayMode,
+}
+
+impl GaussianSplattingGaussianTransform {
+    /// Create a new Gaussian splatting Gaussian transform.
+    pub const fn new() -> Self {
+        Self {
+            size: 1.0,
+            display_mode: gs::GaussianDisplayMode::Splat,
+        }
+    }
+}
+
+impl Default for GaussianSplattingGaussianTransform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The camera to view the Gaussian splatting.
+#[derive(Debug, Clone)]
+pub struct Camera {
+    /// The actual camera.
+    pub camera: gs::Camera,
+
+    /// The movement speed.
+    pub speed: Vec2,
+
+    /// The mouse sensitivity.
+    pub sensitivity: f32,
+}
+
+impl Camera {
+    /// Create a new camera.
+    pub fn new(
+        gaussians: &gs::Gaussians,
+        model_transform: &GaussianSplattingModelTransform,
+    ) -> Self {
+        let mut camera = gs::Camera::new(1e-4..1e4, 60f32.to_radians());
+        camera.pos = gaussians
+            .gaussians
+            .iter()
+            .map(|g| model_transform.quat() * g.pos)
+            .sum::<Vec3>()
+            / gaussians.gaussians.len() as f32;
+        camera.pos.z += gaussians
+            .gaussians
+            .iter()
+            .map(|g| (model_transform.quat() * g.pos).z - camera.pos.z)
+            .fold(f32::INFINITY, |a, b| a.min(b));
+
+        Self {
+            camera,
+            speed: Vec2::ONE,
+            sensitivity: 0.3,
+        }
+    }
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            camera: gs::Camera::new(1e-4..1e4, 60f32.to_radians()),
+            speed: Vec2::ONE,
+            sensitivity: 0.3,
+        }
     }
 }

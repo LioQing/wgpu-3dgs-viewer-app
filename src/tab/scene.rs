@@ -115,7 +115,7 @@ impl Scene {
                 exec_task(async move {
                     if let Some(file) = task.await {
                         let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplattingData::new(file.file_name(), &mut reader);
+                        let gs = app::GaussianSplatting::new(file.file_name(), &mut reader);
 
                         tx.send(gs).expect("send gs");
                         ctx.request_repaint();
@@ -139,14 +139,11 @@ impl Scene {
                     let gs = std::fs::read(file.path.as_ref().expect("file path").clone())
                         .map_err(gs::Error::Io)
                         .and_then(|data| {
-                            app::GaussianSplattingData::new(
-                                file.name.clone(),
-                                &mut Cursor::new(data),
-                            )
+                            app::GaussianSplatting::new(file.name.clone(), &mut Cursor::new(data))
                         });
 
                     #[cfg(target_arch = "wasm32")]
-                    let gs = app::GaussianSplattingData::new(
+                    let gs = app::GaussianSplatting::new(
                         file.name.clone(),
                         &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
                     );
@@ -207,8 +204,9 @@ impl Scene {
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 rect,
                 SceneCallback {
-                    transform: gs.transform.clone(),
-                    camera: gs.camera.clone(),
+                    model_transform: gs.model_transform.clone(),
+                    gaussian_transform: gs.gaussian_transform.clone(),
+                    camera: gs.camera.camera.clone(),
                     viewer_size: Vec2::from_array(rect.size().into()),
                     gaussian_count: gs.gaussians.gaussians.len(),
                 },
@@ -303,35 +301,41 @@ impl SceneInput {
         }
 
         // Camera movement
-        const SPEED: f32 = 1.0;
+        let mut movement = Vec3::ZERO;
 
         let mut forward = 0.0;
         if ui.ctx().input(|input| input.key_down(egui::Key::W)) {
-            forward += SPEED * dt;
+            forward += 1.0;
         }
         if ui.ctx().input(|input| input.key_down(egui::Key::S)) {
-            forward -= SPEED * dt;
+            forward -= 1.0;
         }
+
+        movement += gs.camera.camera.get_forward().with_y(0.0).normalize() * forward;
 
         let mut right = 0.0;
         if ui.ctx().input(|input| input.key_down(egui::Key::D)) {
-            right += SPEED * dt;
+            right += 1.0;
         }
         if ui.ctx().input(|input| input.key_down(egui::Key::A)) {
-            right -= SPEED * dt;
+            right -= 1.0;
         }
 
-        gs.camera.move_by(forward, right);
+        movement += gs.camera.camera.get_right().with_y(0.0).normalize() * right;
+
+        movement = movement.normalize_or_zero() * gs.camera.speed.x;
 
         let mut up = 0.0;
         if ui.ctx().input(|input| input.key_down(egui::Key::Space)) {
-            up += SPEED * dt;
+            up += 1.0;
         }
         if ui.ctx().input(|input| input.modifiers.shift_only()) {
-            up -= SPEED * dt;
+            up -= 1.0;
         }
 
-        gs.camera.move_up(up);
+        movement.y += up * gs.camera.speed.y;
+
+        gs.camera.camera.pos += movement * dt;
 
         // Camera rotation
         #[cfg(not(target_arch = "wasm32"))]
@@ -350,11 +354,9 @@ impl SceneInput {
         #[cfg(target_arch = "wasm32")]
         let mouse_delta = web_result.mouse_move;
 
-        const SENSITIVITY: f32 = 0.3;
-
-        let rotation = mouse_delta * SENSITIVITY * dt;
-        gs.camera.yaw_by(-rotation.x);
-        gs.camera.pitch_by(-rotation.y);
+        let rotation = mouse_delta * gs.camera.sensitivity * dt;
+        gs.camera.camera.yaw_by(-rotation.x);
+        gs.camera.camera.pitch_by(-rotation.y);
     }
 }
 
@@ -531,8 +533,11 @@ impl SceneResource {
 
 /// The scene callback.
 struct SceneCallback {
-    /// The Gaussian splatting transform.
-    transform: app::GaussianSplattingTransform,
+    /// The Gaussian splatting Gaussian transform.
+    gaussian_transform: app::GaussianSplattingGaussianTransform,
+
+    /// The Gaussian splatting model transform.
+    model_transform: app::GaussianSplattingModelTransform,
 
     /// The camera.
     camera: gs::Camera,
@@ -556,11 +561,16 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         let SceneResource { viewer } = callback_resources.get_mut().expect("scene resource");
 
         viewer.update_camera(queue, &self.camera, self.viewer_size.as_uvec2());
-        viewer.update_transform(
+        viewer.update_model_transform(
             queue,
-            self.transform.pos,
-            self.transform.quat(),
-            self.transform.scale,
+            self.model_transform.pos,
+            self.model_transform.quat(),
+            self.model_transform.scale,
+        );
+        viewer.update_gaussian_transform(
+            queue,
+            self.gaussian_transform.size,
+            self.gaussian_transform.display_mode,
         );
 
         viewer
