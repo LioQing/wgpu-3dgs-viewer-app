@@ -2,9 +2,7 @@
 
 ...written in Rust using [wgpu](https://wgpu.rs/) and [egui](https://www.egui.rs/).
 
-[![Github Pages](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml)
-
-[![CI](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml)
+[![Github Pages](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml) [![CI](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml)
 
 ## Getting started
 
@@ -15,6 +13,14 @@ The app uses [WebGPU](https://en.wikipedia.org/wiki/WebGPU) to render the model,
 > [!NOTE]
 >
 > To use the web version, you need a browser that supports WebGPU. Please refer to the [WebGPU Implementation Status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) for more information.
+
+### Running the app
+
+You can run the app on the web by visiting [https://lioqing.com/wgpu-3dgs-viewer-app/](https://lioqing.com/wgpu-3dgs-viewer-app/).
+
+You may also run the app natively by building it from source.
+
+## Development
 
 ### Native
 
@@ -30,7 +36,7 @@ On Fedora Rawhide you need to run:
 
 `dnf install clang clang-devel clang-tools-extra libxkbcommon-devel pkg-config openssl-devel libxcb-devel gtk3-devel atk fontconfig-devel`
 
-### Web Locally
+### Web locally
 
 You can compile your app to [WASM](https://en.wikipedia.org/wiki/WebAssembly) and publish it as a web page.
 

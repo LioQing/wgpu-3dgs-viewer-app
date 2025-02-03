@@ -1,8 +1,9 @@
 use std::{
-    cell::RefCell,
     io::Cursor,
-    rc::Rc,
-    sync::mpsc::{self, Sender},
+    sync::{
+        mpsc::{self, Sender},
+        Arc, Mutex,
+    },
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -641,7 +642,7 @@ enum SceneInputWebEvent {
 #[derive(Debug)]
 struct SceneResource {
     /// The viewer.
-    viewer: Rc<RefCell<gs::Viewer>>,
+    viewer: Arc<Mutex<gs::Viewer>>,
 
     /// The measurement renderer.
     measurement_renderer: renderer::Measurement,
@@ -657,7 +658,7 @@ impl SceneResource {
     /// Create a new scene resource.
     fn new(render_state: &egui_wgpu::RenderState, gaussians: &gs::Gaussians) -> Self {
         log::debug!("Creating viewer");
-        let viewer = Rc::new(RefCell::new(gs::Viewer::new(
+        let viewer = Arc::new(Mutex::new(gs::Viewer::new(
             render_state.device.as_ref(),
             render_state.target_format,
             gaussians,
@@ -667,7 +668,7 @@ impl SceneResource {
         let measurement_renderer = renderer::Measurement::new(
             render_state.device.as_ref(),
             render_state.target_format,
-            &viewer.borrow().camera_buffer,
+            &viewer.lock().expect("viewer").camera_buffer,
         );
 
         log::debug!("Creating query resource");
@@ -692,10 +693,12 @@ struct SceneQueryResource {
     /// The query.
     query: Query,
 
+    #[cfg(target_arch = "wasm32")]
     /// The query stage.
     stage: SceneQueryStage,
 }
 
+#[cfg(target_arch = "wasm32")]
 /// The scene query stage.
 #[derive(Debug)]
 enum SceneQueryStage {
@@ -753,6 +756,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         } = callback_resources.get_mut().expect("scene resource");
 
         // The query results.
+        #[cfg(target_arch = "wasm32")]
         match query_resource {
             Some(SceneQueryResource { query, stage }) => {
                 match stage {
@@ -764,7 +768,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                 label: Some("Query Result Count Download Encoder"),
                             });
                         viewer
-                            .borrow()
+                            .lock()
+                            .expect("viewer")
                             .query_result_count_buffer
                             .prepare_download(&mut encoder);
                         queue.submit(Some(encoder.finish()));
@@ -772,7 +777,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         let (tx, rx) = oneshot::channel();
 
                         viewer
-                            .borrow()
+                            .lock()
+                            .expect("viewer")
                             .query_result_count_buffer
                             .download_buffer()
                             .slice(..)
@@ -781,22 +787,24 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                 move |_| {
                                     let count = bytemuck::pod_read_unaligned(
                                         &viewer
-                                            .borrow()
+                                            .lock()
+                                            .expect("viewer")
                                             .query_result_count_buffer
                                             .download_buffer()
                                             .slice(..)
                                             .get_mapped_range(),
                                     );
                                     viewer
-                                        .borrow()
+                                        .lock()
+                                        .expect("viewer")
                                         .query_result_count_buffer
                                         .download_buffer()
                                         .unmap();
 
                                     if let Err(e) = tx.send(count) {
                                         log::error!(
-                                        "Error occurred while sending query result count: {e:?}"
-                                    );
+                                            "Error occurred while sending query result count: {e:?}"
+                                        );
                                     }
                                 }
                             });
@@ -811,9 +819,10 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         }
                         Ok(count) => {
                             log::debug!("Locate hit query returned {count} hits");
-                            let download = Rc::new(
+                            let download = Arc::new(
                                 viewer
-                                    .borrow()
+                                    .lock()
+                                    .expect("viewer")
                                     .query_results_buffer
                                     .create_download_buffer(device, count),
                             );
@@ -823,7 +832,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                     label: Some("Query Results Download Encoder"),
                                 });
                             viewer
-                                .borrow()
+                                .lock()
+                                .expect("viewer")
                                 .query_results_buffer
                                 .prepare_download(&mut encoder, &download);
                             queue.submit(Some(encoder.finish()));
@@ -880,7 +890,9 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                 }
                                 .unwrap_or(Vec3::ZERO);
 
-                                tx.send(pos).expect("send result");
+                                if let Err(e) = tx.send(pos) {
+                                    log::error!("Error occurred while sending hit pos: {e:?}");
+                                }
                             }
 
                             *query_resource = None;
@@ -889,7 +901,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                 };
 
                 viewer
-                    .borrow_mut()
+                    .lock()
+                    .expect("viewer")
                     .update_query(queue, &gs::QueryPod::none());
             }
             query_resource => {
@@ -900,21 +913,90 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                     });
                 }
 
-                viewer.borrow_mut().update_query(queue, self.query.pod());
+                viewer
+                    .lock()
+                    .expect("viewer")
+                    .update_query(queue, self.query.pod());
             }
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(SceneQueryResource {
+                query:
+                    Query::LocateHit {
+                        pod,
+                        hit_method,
+                        tx,
+                    },
+            }) = query_resource
+            {
+                log::debug!("Querying");
+
+                #[allow(clippy::await_holding_lock)]
+                let mut results = futures::executor::block_on(async {
+                    viewer
+                        .lock()
+                        .expect("viewer")
+                        .download_query_results(device, queue)
+                        .await
+                        .expect("query results")
+                        .into_iter()
+                        .map(gs::QueryHitResultPod::from)
+                        .collect::<Vec<_>>()
+                });
+
+                let pos = match hit_method {
+                    app::MeasurementHitMethod::MostAlpha => gs::query::hit_pos_by_most_alpha(
+                        pod,
+                        &mut results,
+                        &self.camera,
+                        self.viewer_size.as_uvec2(),
+                    )
+                    .map(|(_, _, pos)| pos)
+                    .unwrap_or(Vec3::ZERO),
+                    app::MeasurementHitMethod::Closest => gs::query::hit_pos_by_closest(
+                        pod,
+                        &results,
+                        &self.camera,
+                        self.viewer_size.as_uvec2(),
+                    )
+                    .map(|(_, pos)| pos)
+                    .unwrap_or(Vec3::ZERO),
+                };
+
+                if let Err(e) = tx.send(pos) {
+                    log::error!("Error occurred while sending hit pos: {}", e.0);
+                }
+            }
+
+            *query_resource = None;
+
+            if self.query.pod().query_type() != gs::QueryType::None {
+                *query_resource = Some(SceneQueryResource {
+                    query: self.query.clone(),
+                });
+            }
+
+            viewer
+                .lock()
+                .expect("viewer")
+                .update_query(queue, self.query.pod());
+        }
+
         // Update the viewer.
-        viewer
-            .borrow_mut()
-            .update_camera(queue, &self.camera, self.viewer_size.as_uvec2());
-        viewer.borrow_mut().update_model_transform(
+        viewer.lock().expect("viewer").update_camera(
+            queue,
+            &self.camera,
+            self.viewer_size.as_uvec2(),
+        );
+        viewer.lock().expect("viewer").update_model_transform(
             queue,
             self.model_transform.pos,
             self.model_transform.quat(),
             self.model_transform.scale,
         );
-        viewer.borrow_mut().update_gaussian_transform(
+        viewer.lock().expect("viewer").update_gaussian_transform(
             queue,
             self.gaussian_transform.size,
             self.gaussian_transform.display_mode,
@@ -924,20 +1006,22 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             measurement_renderer.update_hit_pairs(
                 device,
                 &self.measurement_visible_hit_pairs,
-                &viewer.borrow().camera_buffer,
+                &viewer.lock().expect("viewer").camera_buffer,
             );
         }
 
         // Preprocesses.
-        viewer
-            .borrow()
-            .preprocessor
-            .preprocess(egui_encoder, self.gaussian_count as u32);
+        {
+            let viewer = viewer.lock().expect("viewer");
 
-        viewer.borrow().radix_sorter.sort(
-            egui_encoder,
-            &viewer.borrow().radix_sort_indirect_args_buffer,
-        );
+            viewer
+                .preprocessor
+                .preprocess(egui_encoder, self.gaussian_count as u32);
+
+            viewer
+                .radix_sorter
+                .sort(egui_encoder, &viewer.radix_sort_indirect_args_buffer);
+        }
 
         vec![]
     }
@@ -954,10 +1038,13 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             ..
         } = callback_resources.get().expect("scene resource");
 
-        viewer
-            .borrow()
-            .renderer
-            .render_with_pass(render_pass, &viewer.borrow().indirect_args_buffer);
+        {
+            let viewer = viewer.lock().expect("viewer");
+
+            viewer
+                .renderer
+                .render_with_pass(render_pass, &viewer.indirect_args_buffer);
+        }
 
         if !self.measurement_visible_hit_pairs.is_empty() {
             measurement_renderer
