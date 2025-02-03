@@ -20,6 +20,10 @@ You can run the app on the web by visiting [https://lioqing.com/wgpu-3dgs-viewer
 
 You may also run the app natively by building it from source.
 
+### Demo
+
+https://github.com/user-attachments/assets/36262173-6ae5-4f93-a03b-b00a4e050c5a
+
 ## Development
 
 ### Native
