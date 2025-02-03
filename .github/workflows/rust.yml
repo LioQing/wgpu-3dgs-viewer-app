@@ -139,7 +139,7 @@ jobs:
       - name: Install cross for linux
         if: contains(matrix.TARGET, 'linux')
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross --rev 1b8cf50d20180c1a394099e608141480f934b7f7
+          cargo install cross --git https://github.com/cross-rs/cross --rev 4090beca3cfffa44371a5bba524de3a578aa46c3
 
       - name: Install cross for mac and windows
         if: ${{ !contains(matrix.TARGET, 'linux') }}
@@ -151,20 +151,20 @@ jobs:
           cross build --verbose --release --target=${{ matrix.TARGET }}
 
       - name: Rename
-        run: cp target/${{ matrix.TARGET }}/release/wgpu_3dgs_viewer_app${{ matrix.EXTENSION }} wgpu_3dgs_viewer_app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
+        run: cp target/${{ matrix.TARGET }}/release/wgpu-3dgs-viewer-app${{ matrix.EXTENSION }} wgpu-3dgs-viewer-app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
 
       - uses: actions/upload-artifact@master
         with:
-          name: wgpu_3dgs_viewer_app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
-          path: wgpu_3dgs_viewer_app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
+          name: wgpu-3dgs-viewer-app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
+          path: wgpu-3dgs-viewer-app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
 
       - uses: svenstaro/upload-release-action@v2
         name: Upload binaries to release
         if: ${{ github.event_name == 'push' }}
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: wgpu_3dgs_viewer_app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
-          asset_name: wgpu_3dgs_viewer_app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
+          file: wgpu-3dgs-viewer-app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
+          asset_name: wgpu-3dgs-viewer-app-${{ matrix.TARGET }}${{ matrix.EXTENSION }}
           tag: ${{ github.ref }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           overwrite: true
