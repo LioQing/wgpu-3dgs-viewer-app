@@ -4,6 +4,7 @@ use std::{
 };
 
 use glam::*;
+use strum::{EnumCount, EnumIter};
 use wgpu_3dgs_viewer as gs;
 
 use crate::tab;
@@ -82,21 +83,52 @@ impl App {
     /// Show the about dialog.
     fn about(&mut self, ui: &mut egui::Ui) {
         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+            ui.spacing_mut().item_spacing.y *= 2.0;
+
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
 
-                ui.label("Made with ");
-                ui.strong("a sudden burst of motivation");
-                ui.label(" by ");
-                ui.hyperlink_to("Lio Qing", "https://lioqing.com");
+                ui.label("This viewer app is built for ");
+                ui.add(
+                    egui::Hyperlink::from_label_and_url(
+                        "[3D Gaussian Splatting]",
+                        "https://en.wikipedia.org/wiki/Gaussian_splatting",
+                    )
+                    .open_in_new_tab(true),
+                );
+                ui.label(". It supports the PLY file format from the ");
+                ui.add(
+                    egui::Hyperlink::from_label_and_url(
+                        "[3D Gaussian Splatting for Real-Time Radiance Field Rendering]",
+                        "https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/",
+                    )
+                    .open_in_new_tab(true),
+                );
+                ui.label(" research paper.");
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+
+                ui.label("Made by ");
+                ui.hyperlink_to("[Lio Qing]", "https://lioqing.com");
                 ui.label(" with ");
-                ui.hyperlink_to("wgpu", "https://wgpu.rs");
+                ui.add(
+                    egui::Hyperlink::from_label_and_url("[wgpu]", "https://wgpu.rs")
+                        .open_in_new_tab(true),
+                );
                 ui.label(", ");
-                ui.hyperlink_to("egui", "https://github.com/emilk/egui");
+                ui.add(
+                    egui::Hyperlink::from_label_and_url("[egui]", "https://github.com/emilk/egui")
+                        .open_in_new_tab(true),
+                );
                 ui.label(" and ");
-                ui.hyperlink_to(
-                    "eframe",
-                    "https://github.com/emilk/egui/tree/master/crates/eframe",
+                ui.add(
+                    egui::Hyperlink::from_label_and_url(
+                        "[eframe]",
+                        "https://github.com/emilk/egui/tree/master/crates/eframe",
+                    )
+                    .open_in_new_tab(true),
                 );
                 ui.label(". ");
                 ui.hyperlink_to(
@@ -192,11 +224,16 @@ pub struct GaussianSplatting {
 
     /// The Gaussian transform.
     pub gaussian_transform: GaussianSplattingGaussianTransform,
+
+    /// The measurement of the Gaussian splatting.
+    pub measurement: Measurement,
 }
 
 impl GaussianSplatting {
     /// Create a Gaussian splatting model from a PLY file.
     pub fn new(file_name: String, ply: &mut impl BufRead) -> Result<Self, gs::Error> {
+        let measurement = Measurement::new();
+
         let gaussian_transform = GaussianSplattingGaussianTransform::new();
 
         let model_transform = GaussianSplattingModelTransform::new();
@@ -213,6 +250,7 @@ impl GaussianSplatting {
             gaussians,
             model_transform,
             gaussian_transform,
+            measurement,
         })
     }
 }
@@ -330,5 +368,112 @@ impl Default for Camera {
             speed: Vec2::ONE,
             sensitivity: 0.3,
         }
+    }
+}
+
+/// The measurement of the Gaussian splatting.
+#[derive(Debug, Default)]
+pub struct Measurement {
+    /// The measurement hits.
+    pub hit_pairs: Vec<MeasurementHitPair>,
+
+    /// The hit method.
+    pub hit_method: MeasurementHitMethod,
+
+    /// The current measurement action.
+    pub action: Option<MeasurementAction>,
+}
+
+impl Measurement {
+    /// Create a new measurement.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get the visible hit pairs.
+    pub fn visible_hit_pairs(&self) -> impl Iterator<Item = &MeasurementHitPair> + '_ {
+        self.hit_pairs.iter().filter(|hit_pair| hit_pair.visible)
+    }
+}
+
+/// The measurement action.
+#[derive(Debug)]
+pub enum MeasurementAction {
+    /// Locating a hit.
+    LocateHit {
+        /// The index of the hit pair.
+        hit_pair_index: usize,
+
+        /// The index of the hit.
+        ///
+        /// Must be 0 or 1.
+        hit_index: usize,
+
+        /// The sender to send the result.
+        tx: Sender<Vec3>,
+
+        /// The receiver to receive the result.
+        rx: Receiver<Vec3>,
+    },
+}
+
+/// The measurement hit method.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, EnumCount, EnumIter)]
+pub enum MeasurementHitMethod {
+    /// The most alpha hit.
+    #[default]
+    MostAlpha,
+
+    /// The closest hit.
+    Closest,
+}
+
+/// The measurement hit pair.
+#[derive(Debug, Clone)]
+pub struct MeasurementHitPair {
+    /// The label.
+    pub label: String,
+
+    /// Whether the hit pair is visible.
+    pub visible: bool,
+
+    /// The color of the hit pair.
+    pub color: egui::Color32,
+
+    /// The line width.
+    pub line_width: f32,
+
+    /// The hits.
+    pub hits: [MeasurementHit; 2],
+}
+
+impl MeasurementHitPair {
+    /// Create a new measurement hit pair.
+    pub fn new(label: String) -> Self {
+        Self {
+            label,
+            visible: true,
+            color: egui::Color32::RED,
+            line_width: 1.0,
+            hits: [MeasurementHit::default(), MeasurementHit::default()],
+        }
+    }
+
+    /// Ge the distance between the hits.
+    pub fn distance(&self) -> f32 {
+        (self.hits[0].pos - self.hits[1].pos).length()
+    }
+}
+
+/// The measurement hit.
+#[derive(Debug, Clone)]
+pub struct MeasurementHit {
+    /// The position of the hit.
+    pub pos: Vec3,
+}
+
+impl Default for MeasurementHit {
+    fn default() -> Self {
+        Self { pos: Vec3::ZERO }
     }
 }

@@ -2188,6 +2188,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 
 [[package]]
+name = "oneshot"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a746771e3a5eabec71e587114c13feade48a3c80f61dc4d4bbc6613fe43cfc2f"
+
+[[package]]
 name = "orbclient"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3251,12 +3257,13 @@ dependencies = [
 [[package]]
 name = "wgpu-3dgs-viewer"
 version = "0.1.0"
-source = "git+https://github.com/LioQing/wgpu-3dgs-viewer.git#6b79696f9787feb3a44ef4adb2497a817e9d558f"
+source = "git+https://github.com/LioQing/wgpu-3dgs-viewer.git#10af973cb034e2fb4b611a9205313666adefb3d6"
 dependencies = [
  "bitflags 2.8.0",
  "bytemuck",
  "glam",
  "log",
+ "oneshot",
  "thiserror 2.0.11",
  "wgpu",
 ]
@@ -3265,6 +3272,7 @@ dependencies = [
 name = "wgpu-3dgs-viewer-app"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "egui_dock",
@@ -3272,6 +3280,7 @@ dependencies = [
  "futures",
  "glam",
  "log",
+ "oneshot",
  "rfd",
  "serde",
  "strum",

@@ -21,42 +21,40 @@ impl Tab for Transform {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
-        let (model, gaussian, loaded) = match &mut state.gs {
-            app::Loadable::Loaded(gs) => {
-                (&mut gs.model_transform, &mut gs.gaussian_transform, true)
-            }
+        let (model, gaussian, ui_builder) = match &mut state.gs {
+            app::Loadable::Loaded(gs) => (
+                &mut gs.model_transform,
+                &mut gs.gaussian_transform,
+                egui::UiBuilder::new(),
+            ),
             app::Loadable::None { .. } => (
                 &mut app::GaussianSplattingModelTransform::new(),
                 &mut app::GaussianSplattingGaussianTransform::new(),
-                false,
+                egui::UiBuilder::new().disabled(),
             ),
         };
 
         ui.spacing_mut().item_spacing = egui::vec2(ui.spacing().item_spacing.x, 12.0);
 
-        ui.label(egui::RichText::new("Model").strong());
-        self.model(ui, loaded, model);
+        ui.scope_builder(ui_builder, |ui| {
+            ui.label(egui::RichText::new("Model").strong());
+            self.model(ui, model);
 
-        ui.separator();
+            ui.separator();
 
-        ui.label(egui::RichText::new("Gaussian").strong());
-        self.gaussian(ui, loaded, gaussian);
+            ui.label(egui::RichText::new("Gaussian").strong());
+            self.gaussian(ui, gaussian);
+        });
     }
 }
 
 impl Transform {
     /// Create the UI for model transform.
-    fn model(
-        &mut self,
-        ui: &mut egui::Ui,
-        loaded: bool,
-        transform: &mut app::GaussianSplattingModelTransform,
-    ) {
+    fn model(&mut self, ui: &mut egui::Ui, transform: &mut app::GaussianSplattingModelTransform) {
         egui::Grid::new("model_transform_grid").show(ui, |ui| {
             macro_rules! value {
-                ($ui: expr, $loaded: expr, $value: expr) => {
-                    $ui.add_enabled(
-                        $loaded,
+                ($ui: expr, $value: expr) => {
+                    $ui.add(
                         egui::DragValue::new(&mut $value)
                             .speed(0.01)
                             .fixed_decimals(4),
@@ -66,25 +64,25 @@ impl Transform {
 
             ui.label("Position");
             ui.horizontal(|ui| {
-                value!(ui, loaded, transform.pos.x);
-                value!(ui, loaded, transform.pos.y);
-                value!(ui, loaded, transform.pos.z);
+                value!(ui, transform.pos.x);
+                value!(ui, transform.pos.y);
+                value!(ui, transform.pos.z);
             });
             ui.end_row();
 
             ui.label("Rotation");
             ui.horizontal(|ui| {
-                value!(ui, loaded, transform.rot.x);
-                value!(ui, loaded, transform.rot.y);
-                value!(ui, loaded, transform.rot.z);
+                value!(ui, transform.rot.x);
+                value!(ui, transform.rot.y);
+                value!(ui, transform.rot.z);
             });
             ui.end_row();
 
             ui.label("Scale");
             ui.horizontal(|ui| {
-                value!(ui, loaded, transform.scale.x);
-                value!(ui, loaded, transform.scale.y);
-                value!(ui, loaded, transform.scale.z);
+                value!(ui, transform.scale.x);
+                value!(ui, transform.scale.y);
+                value!(ui, transform.scale.z);
             });
             ui.end_row();
         });
@@ -94,30 +92,23 @@ impl Transform {
     fn gaussian(
         &mut self,
         ui: &mut egui::Ui,
-        loaded: bool,
         transform: &mut app::GaussianSplattingGaussianTransform,
     ) {
         egui::Grid::new("gaussian_transform_grid").show(ui, |ui| {
             ui.spacing_mut().slider_width = 100.0;
 
             ui.label("Size");
-            ui.add_enabled(
-                loaded,
-                egui::Slider::new(&mut transform.size, 0.0..=2.0).fixed_decimals(2),
-            );
+            ui.add(egui::Slider::new(&mut transform.size, 0.0..=2.0).fixed_decimals(2));
             ui.end_row();
 
             ui.label("Display Mode");
             ui.horizontal(|ui| {
                 macro_rules! value {
-                    ($ui: expr, $loaded: expr, $value: expr, $label: ident) => {
+                    ($ui: expr, $value: expr, $label: ident) => {
                         if $ui
-                            .add_enabled(
-                                $loaded,
-                                egui::SelectableLabel::new(
-                                    $value == gs::GaussianDisplayMode::$label,
-                                    stringify!($label),
-                                ),
+                            .selectable_label(
+                                $value == gs::GaussianDisplayMode::$label,
+                                stringify!($label),
                             )
                             .clicked()
                         {
@@ -126,9 +117,9 @@ impl Transform {
                     };
                 }
 
-                value!(ui, loaded, transform.display_mode, Splat);
-                value!(ui, loaded, transform.display_mode, Ellipse);
-                value!(ui, loaded, transform.display_mode, Point);
+                value!(ui, transform.display_mode, Splat);
+                value!(ui, transform.display_mode, Ellipse);
+                value!(ui, transform.display_mode, Point);
             });
         });
     }

@@ -1,13 +1,21 @@
-use std::{future::Future, io::Cursor, sync::mpsc::Sender};
+use std::{
+    cell::RefCell,
+    io::Cursor,
+    rc::Rc,
+    sync::mpsc::{self, Sender},
+};
 
 #[cfg(target_arch = "wasm32")]
 use eframe::wasm_bindgen::JsCast;
 
-use eframe::egui_wgpu;
+use eframe::{
+    egui_wgpu,
+    wgpu::{self},
+};
 use glam::*;
 use wgpu_3dgs_viewer as gs;
 
-use crate::app;
+use crate::{app, renderer, util};
 
 use super::Tab;
 
@@ -92,16 +100,6 @@ impl Scene {
         tx: &Sender<Result<app::GaussianSplatting, gs::Error>>,
         err: Option<&gs::Error>,
     ) {
-        #[cfg(not(target_arch = "wasm32"))]
-        fn exec_task(f: impl Future<Output = ()> + Send + 'static) {
-            std::thread::spawn(move || futures::executor::block_on(f));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        fn exec_task(f: impl Future<Output = ()> + 'static) {
-            wasm_bindgen_futures::spawn_local(f);
-        }
-
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.4);
 
@@ -112,7 +110,7 @@ impl Scene {
                 let ctx = ui.ctx().clone();
                 let task = rfd::AsyncFileDialog::new().pick_file();
 
-                exec_task(async move {
+                util::exec_task(async move {
                     if let Some(file) = task.await {
                         let mut reader = Cursor::new(file.read().await);
                         let gs = app::GaussianSplatting::new(file.file_name(), &mut reader);
@@ -199,16 +197,22 @@ impl Scene {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
 
-            self.input.handle(ui, gs, &response);
+            let query = self.input.handle(ui, gs, &rect, &response);
 
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 rect,
                 SceneCallback {
+                    measurement_visible_hit_pairs: gs
+                        .measurement
+                        .visible_hit_pairs()
+                        .cloned()
+                        .collect(),
                     model_transform: gs.model_transform.clone(),
                     gaussian_transform: gs.gaussian_transform.clone(),
                     camera: gs.camera.camera.clone(),
                     viewer_size: Vec2::from_array(rect.size().into()),
                     gaussian_count: gs.gaussians.gaussians.len(),
+                    query,
                 },
             ));
         });
@@ -246,14 +250,83 @@ impl SceneInput {
         &mut self,
         ui: &mut egui::Ui,
         gs: &mut app::GaussianSplatting,
+        rect: &egui::Rect,
         response: &egui::Response,
-    ) {
-        let dt = ui.ctx().input(|input| input.unstable_dt);
-
+    ) -> Query {
         #[cfg(target_arch = "wasm32")]
         let web_result = self.web_event_listener.update();
 
-        // Focus
+        if gs.measurement.action.is_some() {
+            return self.measure(ui, gs, rect, response);
+        }
+
+        self.focus(
+            ui,
+            response,
+            #[cfg(target_arch = "wasm32")]
+            &web_result,
+        );
+
+        if !self.focused {
+            return Query::none();
+        }
+
+        self.control(
+            ui,
+            gs,
+            response,
+            #[cfg(target_arch = "wasm32")]
+            &web_result,
+        );
+
+        Query::none()
+    }
+
+    /// Handle measurement action.
+    fn measure(
+        &mut self,
+        _ui: &mut egui::Ui,
+        gs: &mut app::GaussianSplatting,
+        rect: &egui::Rect,
+        response: &egui::Response,
+    ) -> Query {
+        if let Some(app::MeasurementAction::LocateHit {
+            hit_pair_index,
+            hit_index,
+            rx,
+            ..
+        }) = &gs.measurement.action
+        {
+            if let Ok(hit) = rx.try_recv() {
+                gs.measurement.hit_pairs[*hit_pair_index].hits[*hit_index].pos = hit;
+                gs.measurement.action = None;
+            }
+        }
+
+        match &gs.measurement.action {
+            Some(app::MeasurementAction::LocateHit { tx, .. })
+                if response.clicked_by(egui::PointerButton::Primary) =>
+            {
+                let interact_pos = response.interact_pointer_pos().expect("pointer pos");
+
+                if !rect.contains(interact_pos) {
+                    return Query::none();
+                }
+
+                let pos = (interact_pos - rect.min).to_pos2();
+                Query::locate_hit(pos, gs.measurement.hit_method, tx.clone())
+            }
+            _ => Query::none(),
+        }
+    }
+
+    /// Handle focus.
+    fn focus(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        #[cfg(target_arch = "wasm32")] web_result: &SceneInputWebEventResult,
+    ) {
         #[allow(unused_mut)]
         let mut prev_focused = self.focused;
 
@@ -295,12 +368,18 @@ impl SceneInput {
                 }
             }
         }
+    }
 
-        if !self.focused {
-            return;
-        }
+    /// Handle the scene camera control.
+    fn control(
+        &mut self,
+        ui: &mut egui::Ui,
+        gs: &mut app::GaussianSplatting,
+        _response: &egui::Response,
+        #[cfg(target_arch = "wasm32")] web_result: &SceneInputWebEventResult,
+    ) {
+        let dt = ui.ctx().input(|input| input.unstable_dt);
 
-        // Camera movement
         let mut movement = Vec3::ZERO;
 
         let mut forward = 0.0;
@@ -366,16 +445,65 @@ impl Default for SceneInput {
     }
 }
 
+/// The query callback resources.
+#[derive(Debug, Clone)]
+enum Query {
+    /// The query is none.
+    None { pod: gs::QueryNonePod },
+
+    /// The locate hit query.
+    LocateHit {
+        /// The query POD.
+        pod: gs::QueryHitPod,
+
+        /// The query method.
+        hit_method: app::MeasurementHitMethod,
+
+        /// The query result sender.
+        tx: mpsc::Sender<Vec3>,
+    },
+}
+
+impl Query {
+    /// Create a none query.
+    fn none() -> Self {
+        Self::None {
+            pod: gs::QueryNonePod::new(),
+        }
+    }
+
+    /// Create a locate hit query.
+    fn locate_hit(
+        coords: egui::Pos2,
+        hit_method: app::MeasurementHitMethod,
+        tx: mpsc::Sender<Vec3>,
+    ) -> Self {
+        Self::LocateHit {
+            pod: gs::QueryHitPod::new(Vec2::from_array(coords.into())),
+            hit_method,
+            tx,
+        }
+    }
+
+    /// Get the POD.
+    fn pod(&self) -> &gs::QueryPod {
+        match self {
+            Self::None { pod } => pod.as_query(),
+            Self::LocateHit { pod, .. } => pod.as_query(),
+        }
+    }
+}
+
 /// The web event listener for [`SceneInput`].
 ///
 /// This is only available on the web.
 #[cfg(target_arch = "wasm32")]
 struct SceneInputWebEventListener {
     /// The sender for the web events.
-    tx: std::sync::mpsc::Sender<SceneInputWebEvent>,
+    tx: mpsc::Sender<SceneInputWebEvent>,
 
     /// The receiver for the web events.
-    rx: std::sync::mpsc::Receiver<SceneInputWebEvent>,
+    rx: mpsc::Receiver<SceneInputWebEvent>,
 
     /// The "mousemove" event listener.
     mousemove_listener: eframe::wasm_bindgen::prelude::Closure<dyn FnMut(web_sys::MouseEvent)>,
@@ -388,7 +516,7 @@ struct SceneInputWebEventListener {
 impl SceneInputWebEventListener {
     /// Create a new web event listener.
     fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
 
         let mousemove_listener = {
             let tx = tx.clone();
@@ -512,27 +640,84 @@ enum SceneInputWebEvent {
 /// This is for the [`SceneCallback`].
 #[derive(Debug)]
 struct SceneResource {
-    viewer: gs::Viewer,
+    /// The viewer.
+    viewer: Rc<RefCell<gs::Viewer>>,
+
+    /// The measurement renderer.
+    measurement_renderer: renderer::Measurement,
+
+    /// The query resource.
+    ///
+    /// When the query is not none, all following query will be ignored until the result is
+    /// received.
+    query_resource: Option<SceneQueryResource>,
 }
 
 impl SceneResource {
     /// Create a new scene resource.
     fn new(render_state: &egui_wgpu::RenderState, gaussians: &gs::Gaussians) -> Self {
         log::debug!("Creating viewer");
-        let viewer = gs::Viewer::new(
+        let viewer = Rc::new(RefCell::new(gs::Viewer::new(
             render_state.device.as_ref(),
             render_state.target_format,
             gaussians,
+        )));
+
+        log::debug!("Creating measurement renderer");
+        let measurement_renderer = renderer::Measurement::new(
+            render_state.device.as_ref(),
+            render_state.target_format,
+            &viewer.borrow().camera_buffer,
         );
+
+        log::debug!("Creating query resource");
+        let query_resource = None;
 
         log::info!("Scene loaded");
 
-        Self { viewer }
+        Self {
+            viewer,
+            measurement_renderer,
+            query_resource,
+        }
     }
+}
+
+/// The scene query resource.
+///
+/// This is the query from the previous scene callbacks, since it is not possible to map the
+/// buffer synchronously, we may need multiple frames to get the query result.
+#[derive(Debug)]
+struct SceneQueryResource {
+    /// The query.
+    query: Query,
+
+    /// The query stage.
+    stage: SceneQueryStage,
+}
+
+/// The scene query stage.
+#[derive(Debug)]
+enum SceneQueryStage {
+    /// The viewer is querying.
+    Querying,
+    /// The locate hit query is downloading count.
+    LocateHitDownloadingCount {
+        /// The receiver.
+        rx: oneshot::Receiver<u32>,
+    },
+    /// The locate hit query is downloading the results.
+    LocateHitDownloadingResults {
+        /// The receiver.
+        rx: oneshot::Receiver<Vec<gs::QueryHitResultPod>>,
+    },
 }
 
 /// The scene callback.
 struct SceneCallback {
+    /// The highlighted measurement hit pair.
+    measurement_visible_hit_pairs: Vec<app::MeasurementHitPair>,
+
     /// The Gaussian splatting Gaussian transform.
     gaussian_transform: app::GaussianSplattingGaussianTransform,
 
@@ -547,39 +732,212 @@ struct SceneCallback {
 
     /// The Gaussian count.
     gaussian_count: usize,
+
+    /// The query.
+    query: Query,
 }
 
 impl egui_wgpu::CallbackTrait for SceneCallback {
     fn prepare(
         &self,
-        _device: &eframe::wgpu::Device,
-        queue: &eframe::wgpu::Queue,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        egui_encoder: &mut eframe::wgpu::CommandEncoder,
+        egui_encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<eframe::wgpu::CommandBuffer> {
-        let SceneResource { viewer } = callback_resources.get_mut().expect("scene resource");
+    ) -> Vec<wgpu::CommandBuffer> {
+        let SceneResource {
+            viewer,
+            measurement_renderer,
+            query_resource,
+        } = callback_resources.get_mut().expect("scene resource");
 
-        viewer.update_camera(queue, &self.camera, self.viewer_size.as_uvec2());
-        viewer.update_model_transform(
+        // The query results.
+        match query_resource {
+            Some(SceneQueryResource { query, stage }) => {
+                match stage {
+                    SceneQueryStage::Querying => {
+                        log::debug!("Querying");
+
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Query Result Count Download Encoder"),
+                            });
+                        viewer
+                            .borrow()
+                            .query_result_count_buffer
+                            .prepare_download(&mut encoder);
+                        queue.submit(Some(encoder.finish()));
+
+                        let (tx, rx) = oneshot::channel();
+
+                        viewer
+                            .borrow()
+                            .query_result_count_buffer
+                            .download_buffer()
+                            .slice(..)
+                            .map_async(wgpu::MapMode::Read, {
+                                let viewer = viewer.clone();
+                                move |_| {
+                                    let count = bytemuck::pod_read_unaligned(
+                                        &viewer
+                                            .borrow()
+                                            .query_result_count_buffer
+                                            .download_buffer()
+                                            .slice(..)
+                                            .get_mapped_range(),
+                                    );
+                                    viewer
+                                        .borrow()
+                                        .query_result_count_buffer
+                                        .download_buffer()
+                                        .unmap();
+
+                                    if let Err(e) = tx.send(count) {
+                                        log::error!(
+                                        "Error occurred while sending query result count: {e:?}"
+                                    );
+                                    }
+                                }
+                            });
+                        device.poll(wgpu::Maintain::Wait);
+
+                        *stage = SceneQueryStage::LocateHitDownloadingCount { rx };
+                    }
+                    SceneQueryStage::LocateHitDownloadingCount { rx } => match rx.try_recv() {
+                        Ok(0) => {
+                            log::debug!("Locate hit query returned 0 hits");
+                            *query_resource = None;
+                        }
+                        Ok(count) => {
+                            log::debug!("Locate hit query returned {count} hits");
+                            let download = Rc::new(
+                                viewer
+                                    .borrow()
+                                    .query_results_buffer
+                                    .create_download_buffer(device, count),
+                            );
+
+                            let mut encoder =
+                                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("Query Results Download Encoder"),
+                                });
+                            viewer
+                                .borrow()
+                                .query_results_buffer
+                                .prepare_download(&mut encoder, &download);
+                            queue.submit(Some(encoder.finish()));
+
+                            let (tx, rx) = oneshot::channel();
+                            download.slice(..).map_async(wgpu::MapMode::Read, {
+                                let download = download.clone();
+                                move |_| {
+                                    let results = bytemuck::allocation::pod_collect_to_vec(
+                                        &download.slice(..).get_mapped_range(),
+                                    );
+
+                                    if let Err(e) = tx.send(results) {
+                                        log::error!(
+                                            "Error occurred while sending query results: {e:?}"
+                                        );
+                                    }
+                                }
+                            });
+                            device.poll(wgpu::Maintain::Wait);
+
+                            *stage = SceneQueryStage::LocateHitDownloadingResults { rx };
+                        }
+                        _ => {}
+                    },
+                    SceneQueryStage::LocateHitDownloadingResults { rx, .. } => {
+                        if let Ok(mut results) = rx.try_recv() {
+                            if let Query::LocateHit {
+                                pod,
+                                hit_method,
+                                tx,
+                                ..
+                            } = query
+                            {
+                                let pos = match hit_method {
+                                    app::MeasurementHitMethod::MostAlpha => {
+                                        gs::query::hit_pos_by_most_alpha(
+                                            pod,
+                                            &mut results,
+                                            &self.camera,
+                                            self.viewer_size.as_uvec2(),
+                                        )
+                                        .map(|(_, _, pos)| pos)
+                                    }
+                                    app::MeasurementHitMethod::Closest => {
+                                        gs::query::hit_pos_by_closest(
+                                            pod,
+                                            &results,
+                                            &self.camera,
+                                            self.viewer_size.as_uvec2(),
+                                        )
+                                        .map(|(_, pos)| pos)
+                                    }
+                                }
+                                .unwrap_or(Vec3::ZERO);
+
+                                tx.send(pos).expect("send result");
+                            }
+
+                            *query_resource = None;
+                        }
+                    }
+                };
+
+                viewer
+                    .borrow_mut()
+                    .update_query(queue, &gs::QueryPod::none());
+            }
+            query_resource => {
+                if self.query.pod().query_type() != gs::QueryType::None {
+                    *query_resource = Some(SceneQueryResource {
+                        query: self.query.clone(),
+                        stage: SceneQueryStage::Querying,
+                    });
+                }
+
+                viewer.borrow_mut().update_query(queue, self.query.pod());
+            }
+        };
+
+        // Update the viewer.
+        viewer
+            .borrow_mut()
+            .update_camera(queue, &self.camera, self.viewer_size.as_uvec2());
+        viewer.borrow_mut().update_model_transform(
             queue,
             self.model_transform.pos,
             self.model_transform.quat(),
             self.model_transform.scale,
         );
-        viewer.update_gaussian_transform(
+        viewer.borrow_mut().update_gaussian_transform(
             queue,
             self.gaussian_transform.size,
             self.gaussian_transform.display_mode,
         );
 
+        if !self.measurement_visible_hit_pairs.is_empty() {
+            measurement_renderer.update_hit_pairs(
+                device,
+                &self.measurement_visible_hit_pairs,
+                &viewer.borrow().camera_buffer,
+            );
+        }
+
+        // Preprocesses.
         viewer
+            .borrow()
             .preprocessor
             .preprocess(egui_encoder, self.gaussian_count as u32);
 
-        viewer
-            .radix_sorter
-            .sort(egui_encoder, &viewer.radix_sort_indirect_args_buffer);
+        viewer.borrow().radix_sorter.sort(
+            egui_encoder,
+            &viewer.borrow().radix_sort_indirect_args_buffer,
+        );
 
         vec![]
     }
@@ -587,13 +945,23 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
     fn paint(
         &self,
         _info: egui::PaintCallbackInfo,
-        render_pass: &mut eframe::wgpu::RenderPass<'static>,
+        render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let SceneResource { viewer } = callback_resources.get().expect("scene resource");
+        let SceneResource {
+            viewer,
+            measurement_renderer,
+            ..
+        } = callback_resources.get().expect("scene resource");
 
         viewer
+            .borrow()
             .renderer
-            .render_with_pass(render_pass, &viewer.indirect_args_buffer);
+            .render_with_pass(render_pass, &viewer.borrow().indirect_args_buffer);
+
+        if !self.measurement_visible_hit_pairs.is_empty() {
+            measurement_renderer
+                .render(render_pass, self.measurement_visible_hit_pairs.len() as u32);
+        }
     }
 }
