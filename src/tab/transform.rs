@@ -27,7 +27,7 @@ impl Tab for Transform {
                 &mut gs.gaussian_transform,
                 egui::UiBuilder::new(),
             ),
-            app::Loadable::None { .. } => (
+            app::Loadable::Unloaded { .. } => (
                 &mut app::GaussianSplattingModelTransform::new(),
                 &mut app::GaussianSplattingGaussianTransform::new(),
                 egui::UiBuilder::new().disabled(),

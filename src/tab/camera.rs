@@ -21,7 +21,7 @@ impl Tab for Camera {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
         let (camera, ui_builder) = match &mut state.gs {
             app::Loadable::Loaded(gs) => (&mut gs.camera, egui::UiBuilder::new()),
-            app::Loadable::None { .. } => (
+            app::Loadable::Unloaded { .. } => (
                 &mut app::Camera::default(),
                 egui::UiBuilder::new().disabled(),
             ),

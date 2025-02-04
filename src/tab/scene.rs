@@ -1,9 +1,6 @@
 use std::{
     io::Cursor,
-    sync::{
-        mpsc::{self, Sender},
-        Arc, Mutex,
-    },
+    sync::{mpsc, Arc, Mutex},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -16,7 +13,10 @@ use eframe::{
 use glam::*;
 use wgpu_3dgs_viewer as gs;
 
-use crate::{app, renderer, util};
+use crate::{
+    app::{self, Unloaded},
+    renderer, util,
+};
 
 use super::Tab;
 
@@ -50,8 +50,8 @@ impl Tab for Scene {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, state: &mut app::State) {
-        match &state.gs {
-            app::Loadable::None { tx, rx, err } => match rx.try_recv() {
+        let updated_gs = match &mut state.gs {
+            app::Loadable::Unloaded(unloaded) => match unloaded.rx.try_recv() {
                 Ok(Ok(mut gs)) => {
                     log::debug!("Gaussian splatting loaded");
 
@@ -66,29 +66,37 @@ impl Tab for Scene {
                             &gs.gaussians,
                         ));
 
-                    state.gs = match self.loaded(ui, &mut gs) {
-                        false => app::Loadable::none(),
-                        true => app::Loadable::loaded(gs),
-                    };
+                    match self.loaded(ui, &mut gs) {
+                        false => None,
+                        true => Some(app::Loadable::loaded(gs)),
+                    }
                 }
                 Ok(Err(err)) => {
                     log::debug!("Error loading Gaussian splatting: {err}");
 
-                    self.empty(ui, tx, Some(&err));
-                    state.gs = app::Loadable::error(err);
+                    self.empty(ui, unloaded);
+
+                    Some(app::Loadable::error(err))
                 }
-                _ => self.empty(ui, tx, err.as_ref()),
+                _ => {
+                    self.empty(ui, unloaded);
+
+                    None
+                }
             },
             app::Loadable::Loaded(_) => {
-                let loaded = match &mut state.gs {
-                    app::Loadable::Loaded(gs) => self.loaded(ui, gs),
-                    _ => false,
-                };
+                let loaded = self.loaded(ui, state.gs.as_mut().unwrap());
 
                 if !loaded {
-                    state.gs = app::Loadable::none();
+                    Some(app::Loadable::unloaded())
+                } else {
+                    None
                 }
             }
+        };
+
+        if let Some(gs) = updated_gs {
+            state.gs = gs;
         }
     }
 }
@@ -98,8 +106,7 @@ impl Scene {
     fn empty(
         &mut self,
         ui: &mut egui::Ui,
-        tx: &Sender<Result<app::GaussianSplatting, gs::Error>>,
-        err: Option<&gs::Error>,
+        unloaded: &mut Unloaded<app::GaussianSplatting, String>,
     ) {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.4);
@@ -107,14 +114,17 @@ impl Scene {
             ui.label("Drag & Drop");
             ui.label("OR");
             if ui.button("Browse File").clicked() {
-                let tx = tx.clone();
+                let tx = unloaded.tx.clone();
                 let ctx = ui.ctx().clone();
-                let task = rfd::AsyncFileDialog::new().pick_file();
+                let task = rfd::AsyncFileDialog::new()
+                    .set_title("Open a PLY file")
+                    .pick_file();
 
                 util::exec_task(async move {
                     if let Some(file) = task.await {
                         let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplatting::new(file.file_name(), &mut reader);
+                        let gs = app::GaussianSplatting::new(file.file_name(), &mut reader)
+                            .map_err(|e| e.to_string());
 
                         tx.send(gs).expect("send gs");
                         ctx.request_repaint();
@@ -123,48 +133,47 @@ impl Scene {
             }
 
             ui.label("");
-            ui.label("to Open a PLY File 📦");
+            ui.label("to Open a PLY Model File 📦");
 
-            if let Some(err) = err {
+            if ui.ctx().input(|input| !input.raw.hovered_files.is_empty()) {
+                ui.label("");
+                ui.label("Release to Load");
+            } else if let Some(err) = &unloaded.err {
                 ui.label("");
                 ui.label(egui::RichText::new(format!("Error: {err}")).color(egui::Color32::RED));
             }
 
-            if let Some(result) = ui.ctx().input(|input| {
-                let mut err = None;
-
-                for file in input.raw.dropped_files.iter() {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let gs = std::fs::read(file.path.as_ref().expect("file path").clone())
-                        .map_err(gs::Error::Io)
-                        .and_then(|data| {
-                            app::GaussianSplatting::new(file.name.clone(), &mut Cursor::new(data))
-                        });
-
-                    #[cfg(target_arch = "wasm32")]
-                    let gs = app::GaussianSplatting::new(
-                        file.name.clone(),
-                        &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
-                    );
-
-                    match gs {
-                        Ok(gs) => {
-                            return Some(Ok(gs));
-                        }
-                        Err(e) => {
-                            err = Some(e);
-                        }
-                    }
+            match ui
+                .ctx()
+                .input(|input| match &input.raw.dropped_files.as_slice() {
+                    [_x, _xs, ..] => Some(Err("only one file is allowed")),
+                    [file] => Some(Ok(match cfg!(target_arch = "wasm32") {
+                        true => app::GaussianSplatting::new(
+                            file.name.clone(),
+                            &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
+                        )
+                        .map_err(|e| e.to_string()),
+                        false => std::fs::read(file.path.as_ref().expect("file path").clone())
+                            .map_err(gs::Error::Io)
+                            .map_err(|e| e.to_string())
+                            .and_then(|data| {
+                                app::GaussianSplatting::new(
+                                    file.name.clone(),
+                                    &mut Cursor::new(data),
+                                )
+                                .map_err(|e| e.to_string())
+                            }),
+                    })),
+                    _ => None,
+                }) {
+                Some(Ok(result)) => {
+                    unloaded.tx.send(result).expect("send gs");
+                    ui.ctx().request_repaint();
                 }
-
-                if let Some(err) = err {
-                    return Some(Err(err));
+                Some(Err(err)) => {
+                    unloaded.err = Some(err.to_string());
                 }
-
-                None
-            }) {
-                tx.send(result).expect("send gs");
-                ui.ctx().request_repaint();
+                None => {}
             }
         });
     }
@@ -180,7 +189,13 @@ impl Scene {
 
             ui.separator();
 
-            loaded &= !ui.button("🗑 Unload").clicked();
+            loaded &= !ui.button("🗑 Close model").clicked();
+
+            ui.menu_button("🔍 Help", |ui| {
+                ui.label("• Click on the viewer to focus, press Esc to unfocus");
+                ui.label("• WASD to move, Space to go up, Shift to go down");
+                ui.label("• Mouse to look around");
+            });
 
             ui.separator();
 
@@ -658,6 +673,8 @@ impl SceneResource {
     /// Create a new scene resource.
     fn new(render_state: &egui_wgpu::RenderState, gaussians: &gs::Gaussians) -> Self {
         log::debug!("Creating viewer");
+        // In WASM, the viewer is not Send nor Sync, but in native, it is.
+        #[allow(clippy::arc_with_non_send_sync)]
         let viewer = Arc::new(Mutex::new(gs::Viewer::new(
             render_state.device.as_ref(),
             render_state.target_format,
@@ -819,6 +836,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         }
                         Ok(count) => {
                             log::debug!("Locate hit query returned {count} hits");
+                            // In WASM, the viewer is not Send nor Sync, but in native, it is.
+                            #[allow(clippy::arc_with_non_send_sync)]
                             let download = Arc::new(
                                 viewer
                                     .lock()

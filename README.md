@@ -16,7 +16,7 @@ The app uses [WebGPU](https://en.wikipedia.org/wiki/WebGPU) to render the model,
 
 ### Running the app
 
-You can run the app on the web by visiting [https://lioqing.com/wgpu-3dgs-viewer-app/](https://lioqing.com/wgpu-3dgs-viewer-app/).
+You can run the app on the web by visiting [lioqing.com/wgpu-3dgs-viewer-app/](https://lioqing.com/wgpu-3dgs-viewer-app/).
 
 You may also run the app natively by building it from source.
 
@@ -42,9 +42,7 @@ On Fedora Rawhide you need to run:
 
 ### Web locally
 
-You can compile your app to [WASM](https://en.wikipedia.org/wiki/WebAssembly) and publish it as a web page.
-
-We use [Trunk](https://trunkrs.dev/) to build for web target.
+We compile to [WASM](https://en.wikipedia.org/wiki/WebAssembly) and use [Trunk](https://trunkrs.dev/) to build for web target.
 
 1. Install the required target with `rustup target add wasm32-unknown-unknown`.
 2. Install Trunk with `cargo install --locked trunk`.

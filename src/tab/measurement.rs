@@ -23,7 +23,7 @@ impl Tab for Measurement {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
         let (measurement, ui_builder) = match &mut state.gs {
             app::Loadable::Loaded(gs) => (&mut gs.measurement, egui::UiBuilder::new()),
-            app::Loadable::None { .. } => (
+            app::Loadable::Unloaded { .. } => (
                 &mut app::Measurement::new(),
                 egui::UiBuilder::new().disabled(),
             ),

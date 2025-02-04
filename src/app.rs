@@ -1,5 +1,5 @@
 use std::{
-    io::BufRead,
+    io::{BufRead, Cursor},
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -7,7 +7,7 @@ use glam::*;
 use strum::{EnumCount, EnumIter};
 use wgpu_3dgs_viewer as gs;
 
-use crate::tab;
+use crate::{tab, util};
 
 /// The main application.
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -37,9 +37,9 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     pub fn get_document() -> web_sys::Document {
         web_sys::window()
-            .expect("No window")
+            .expect("window")
             .document()
-            .expect("No document")
+            .expect("document")
     }
 
     /// Get the canvas.
@@ -51,17 +51,54 @@ impl App {
 
         Self::get_document()
             .get_element_by_id("the_canvas_id")
-            .expect("Failed to find the_canvas_id")
+            .expect("the_canvas_id")
             .dyn_into::<web_sys::HtmlCanvasElement>()
-            .expect("the_canvas_id was not a HtmlCanvasElement")
+            .expect("the_canvas_id to be a HtmlCanvasElement")
     }
 
     /// Create the menu bar.
     fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if !cfg!(target_arch = "wasm32") && ui.button("Quit").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if ui.button("Open model...").clicked() {
+                    self.state.gs = Loadable::unloaded();
+                    let Loadable::Unloaded(unloaded) = &mut self.state.gs else {
+                        unreachable!()
+                    };
+
+                    let tx = unloaded.tx.clone();
+                    let ctx = ui.ctx().clone();
+                    let task = rfd::AsyncFileDialog::new()
+                        .set_title("Open a PLY file")
+                        .pick_file();
+
+                    util::exec_task(async move {
+                        if let Some(file) = task.await {
+                            let mut reader = Cursor::new(file.read().await);
+                            let gs = GaussianSplatting::new(file.file_name(), &mut reader)
+                                .map_err(|e| e.to_string());
+
+                            tx.send(gs).expect("send gs");
+                            ctx.request_repaint();
+                        }
+                    });
+
+                    ui.close_menu();
+                }
+
+                if ui
+                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Close model"))
+                    .clicked()
+                {
+                    self.state.gs = Loadable::unloaded();
+                    ui.close_menu();
+                }
+
+                if !cfg!(target_arch = "wasm32") {
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
             });
 
@@ -73,10 +110,10 @@ impl App {
 
             egui::widgets::global_theme_preference_buttons(ui);
 
-            if cfg!(debug_assertions) {
-                ui.separator();
-                egui::warn_if_debug_build(ui);
-            }
+            // if cfg!(debug_assertions) {
+            //     ui.separator();
+            //     egui::warn_if_debug_build(ui);
+            // }
         });
     }
 
@@ -164,46 +201,79 @@ impl eframe::App for App {
 #[derive(Debug, Default)]
 pub struct State {
     /// The Gaussian splatting model, which can be loaded from a file.
-    pub gs: Loadable<GaussianSplatting, gs::Error>,
+    pub gs: Loadable<GaussianSplatting, String>,
+}
+
+/// An unloaded value.
+#[derive(Debug)]
+pub struct Unloaded<T, E> {
+    pub tx: Sender<Result<T, E>>,
+    pub rx: Receiver<Result<T, E>>,
+    pub err: Option<E>,
 }
 
 /// A loadable value.
 #[derive(Debug)]
 pub enum Loadable<T, E> {
-    None {
-        tx: Sender<Result<T, E>>,
-        rx: Receiver<Result<T, E>>,
-        err: Option<E>,
-    },
+    Unloaded(Unloaded<T, E>),
     Loaded(T),
 }
 
 impl<T, E> Loadable<T, E> {
-    /// Create an empty instance of the loadable value.
-    pub fn none() -> Self {
+    /// Create an unloaded instance of the loadable value.
+    pub fn unloaded() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        Self::None { tx, rx, err: None }
+        Self::Unloaded(Unloaded { tx, rx, err: None })
     }
 
     /// Create an error instance of the loadable value.
     pub fn error(err: E) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        Self::None {
+        Self::Unloaded(Unloaded {
             tx,
             rx,
             err: Some(err),
-        }
+        })
     }
 
     /// Create a loaded instance of the loadable value.
     pub fn loaded(value: T) -> Self {
         Self::Loaded(value)
     }
+
+    /// Check if the value is loaded.
+    pub fn is_loaded(&self) -> bool {
+        matches!(self, Self::Loaded(_))
+    }
+
+    /// Get the loaded value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not loaded.
+    pub fn unwrap(self) -> T {
+        match self {
+            Self::Loaded(value) => value,
+            _ => panic!("value not loaded"),
+        }
+    }
+
+    /// Converts from `&mut Loadable<T, E>` to `Loadable<&mut T, E>`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not loaded.
+    pub fn as_mut(&mut self) -> Loadable<&mut T, E> {
+        match self {
+            Self::Loaded(value) => Loadable::loaded(value),
+            _ => panic!("value not loaded"),
+        }
+    }
 }
 
 impl<T, E> Default for Loadable<T, E> {
     fn default() -> Self {
-        Self::none()
+        Self::unloaded()
     }
 }
 
