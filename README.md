@@ -22,7 +22,7 @@ You may also run the app natively by building it from source.
 
 ### Demo
 
-https://github.com/user-attachments/assets/36262173-6ae5-4f93-a03b-b00a4e050c5a
+https://github.com/user-attachments/assets/63275b41-ba1e-4c71-aae0-c43e514eac0c
 
 ## Development
 
