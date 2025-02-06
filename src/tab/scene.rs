@@ -191,12 +191,6 @@ impl Scene {
 
             loaded &= !ui.button("🗑 Close model").clicked();
 
-            ui.menu_button("🔍 Help", |ui| {
-                ui.label("• Click on the viewer to focus, press Esc to unfocus");
-                ui.label("• WASD to move, Space to go up, Shift to go down");
-                ui.label("• Mouse to look around");
-            });
-
             ui.separator();
 
             let dt = ui.ctx().input(|input| input.unstable_dt);
@@ -225,7 +219,7 @@ impl Scene {
                         .collect(),
                     model_transform: gs.model_transform.clone(),
                     gaussian_transform: gs.gaussian_transform.clone(),
-                    camera: gs.camera.camera.clone(),
+                    camera: gs.camera.control.clone(),
                     viewer_size: Vec2::from_array(rect.size().into()),
                     gaussian_count: gs.gaussians.gaussians.len(),
                     query,
@@ -274,17 +268,6 @@ impl SceneInput {
 
         if gs.measurement.action.is_some() {
             return self.measure(ui, gs, rect, response);
-        }
-
-        self.focus(
-            ui,
-            response,
-            #[cfg(target_arch = "wasm32")]
-            &web_result,
-        );
-
-        if !self.focused {
-            return Query::none();
         }
 
         self.control(
@@ -391,9 +374,51 @@ impl SceneInput {
         &mut self,
         ui: &mut egui::Ui,
         gs: &mut app::GaussianSplatting,
-        _response: &egui::Response,
+        response: &egui::Response,
         #[cfg(target_arch = "wasm32")] web_result: &SceneInputWebEventResult,
     ) {
+        match gs.camera.control {
+            app::CameraControl::FirstPerson(_) => {
+                self.control_by_first_person(
+                    ui,
+                    gs,
+                    response,
+                    #[cfg(target_arch = "wasm32")]
+                    web_result,
+                );
+            }
+            app::CameraControl::Orbit(_) => {
+                self.control_by_orbit(ui, gs, response);
+            }
+        }
+    }
+
+    /// Handle the scene camera by first person control.
+    fn control_by_first_person(
+        &mut self,
+        ui: &mut egui::Ui,
+        gs: &mut app::GaussianSplatting,
+        response: &egui::Response,
+        #[cfg(target_arch = "wasm32")] web_result: &SceneInputWebEventResult,
+    ) {
+        self.focus(
+            ui,
+            response,
+            #[cfg(target_arch = "wasm32")]
+            web_result,
+        );
+
+        if !self.focused {
+            return;
+        }
+
+        let control = match &mut gs.camera.control {
+            app::CameraControl::FirstPerson(control) => control,
+            _ => {
+                log::error!("First person control expected");
+                return;
+            }
+        };
         let dt = ui.ctx().input(|input| input.unstable_dt);
 
         let mut movement = Vec3::ZERO;
@@ -406,7 +431,7 @@ impl SceneInput {
             forward -= 1.0;
         }
 
-        movement += gs.camera.camera.get_forward().with_y(0.0).normalize() * forward;
+        movement += control.get_forward().with_y(0.0).normalize() * forward;
 
         let mut right = 0.0;
         if ui.ctx().input(|input| input.key_down(egui::Key::D)) {
@@ -416,9 +441,9 @@ impl SceneInput {
             right -= 1.0;
         }
 
-        movement += gs.camera.camera.get_right().with_y(0.0).normalize() * right;
+        movement += control.get_right().with_y(0.0).normalize() * right;
 
-        movement = movement.normalize_or_zero() * gs.camera.speed.x;
+        movement = movement.normalize_or_zero() * gs.camera.speed;
 
         let mut up = 0.0;
         if ui.ctx().input(|input| input.key_down(egui::Key::Space)) {
@@ -428,9 +453,9 @@ impl SceneInput {
             up -= 1.0;
         }
 
-        movement.y += up * gs.camera.speed.y;
+        movement.y += up * gs.camera.speed;
 
-        gs.camera.camera.pos += movement * dt;
+        control.pos += movement * dt;
 
         // Camera rotation
         #[cfg(not(target_arch = "wasm32"))]
@@ -450,8 +475,95 @@ impl SceneInput {
         let mouse_delta = web_result.mouse_move;
 
         let rotation = mouse_delta * gs.camera.sensitivity * dt;
-        gs.camera.camera.yaw_by(-rotation.x);
-        gs.camera.camera.pitch_by(-rotation.y);
+        control.yaw_by(-rotation.x);
+        control.pitch_by(-rotation.y);
+    }
+
+    /// Handle the scene camera by orbit control.
+    fn control_by_orbit(
+        &mut self,
+        ui: &mut egui::Ui,
+        gs: &mut app::GaussianSplatting,
+        response: &egui::Response,
+    ) {
+        let control = match &mut gs.camera.control {
+            app::CameraControl::Orbit(orbit) => orbit,
+            _ => {
+                log::error!("Orbit control expected");
+                return;
+            }
+        };
+        let dt = ui.ctx().input(|input| input.unstable_dt);
+
+        // Hover cursor.
+        if response.hovered() {
+            let icon = match response.is_pointer_button_down_on() {
+                true => egui::CursorIcon::Grabbing,
+                false => egui::CursorIcon::Grab,
+            };
+
+            ui.ctx().output_mut(|out| out.cursor_icon = icon);
+        }
+
+        /// Find the updated orbit vector from pos to target.
+        fn orbit(pos: Vec3, target: Vec3, delta: Vec2) -> Vec3 {
+            let diff = target - pos;
+            let direction = diff.normalize();
+
+            let azimuth = direction.x.atan2(direction.z);
+            let elevation = direction.y.asin();
+
+            let azimuth = (azimuth - delta.x) % (2.0 * std::f32::consts::PI);
+            let elevation = (elevation - delta.y).clamp(
+                -std::f32::consts::FRAC_PI_2 + 1e-6,
+                std::f32::consts::FRAC_PI_2 - 1e-6,
+            );
+
+            let direction = Vec3::new(
+                elevation.cos() * azimuth.sin(),
+                elevation.sin(),
+                elevation.cos() * azimuth.cos(),
+            );
+
+            direction * diff.length()
+        }
+
+        // Orbit
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let delta = Vec2::from_array(response.drag_delta().into());
+            let rotation = delta * gs.camera.sensitivity * dt;
+            control.pos = control.target - orbit(control.pos, control.target, rotation);
+        }
+
+        // Look
+        if response.dragged_by(egui::PointerButton::Middle) {
+            let delta = Vec2::from_array(response.drag_delta().into());
+            let rotation = delta * gs.camera.sensitivity * dt * vec2(1.0, -1.0);
+            control.target = control.pos - orbit(control.target, control.pos, rotation);
+        }
+
+        // Pan
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let delta = Vec2::from_array(response.drag_delta().into());
+            let right = (control.pos - control.target).cross(Vec3::Y).normalize();
+            let up = (control.target - control.pos).cross(right).normalize();
+            let movement = (right * delta.x + up * delta.y) * 0.5 * gs.camera.speed * dt;
+            control.pos += movement;
+            control.target += movement;
+        }
+
+        // Zoom
+        const MAX_ZOOM: f32 = 0.1;
+
+        let delta = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+        let diff = control.target - control.pos;
+        let zoom = diff.normalize() * delta * 0.5 * gs.camera.speed * dt;
+
+        if delta > 0.0 && diff.length_squared() <= zoom.length_squared() + MAX_ZOOM * MAX_ZOOM {
+            control.pos = control.target - diff.normalize() * MAX_ZOOM;
+        } else {
+            control.pos += zoom;
+        }
     }
 }
 
@@ -745,7 +857,7 @@ struct SceneCallback {
     model_transform: app::GaussianSplattingModelTransform,
 
     /// The camera.
-    camera: gs::Camera,
+    camera: app::CameraControl,
 
     /// The viewer size.
     viewer_size: Vec2,

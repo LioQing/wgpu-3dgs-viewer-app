@@ -1,5 +1,6 @@
 use std::{
     io::{BufRead, Cursor},
+    ops::Range,
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -110,10 +111,10 @@ impl App {
 
             egui::widgets::global_theme_preference_buttons(ui);
 
-            // if cfg!(debug_assertions) {
-            //     ui.separator();
-            //     egui::warn_if_debug_build(ui);
-            // }
+            if cfg!(debug_assertions) {
+                ui.separator();
+                egui::warn_if_debug_build(ui);
+            }
         });
     }
 
@@ -394,13 +395,13 @@ impl Default for GaussianSplattingGaussianTransform {
 /// The camera to view the Gaussian splatting.
 #[derive(Debug, Clone)]
 pub struct Camera {
-    /// The actual camera.
-    pub camera: gs::Camera,
+    /// The control.
+    pub control: CameraControl,
 
     /// The movement speed.
-    pub speed: Vec2,
+    pub speed: f32,
 
-    /// The mouse sensitivity.
+    /// The rotation sensitivity.
     pub sensitivity: f32,
 }
 
@@ -410,22 +411,22 @@ impl Camera {
         gaussians: &gs::Gaussians,
         model_transform: &GaussianSplattingModelTransform,
     ) -> Self {
-        let mut camera = gs::Camera::new(1e-4..1e4, 60f32.to_radians());
-        camera.pos = gaussians
+        let mut control = CameraFirstPersonControl::new(1e-4..1e4, 60f32.to_radians());
+        control.pos = gaussians
             .gaussians
             .iter()
             .map(|g| model_transform.quat() * g.pos)
             .sum::<Vec3>()
             / gaussians.gaussians.len() as f32;
-        camera.pos.z += gaussians
+        control.pos.z += gaussians
             .gaussians
             .iter()
-            .map(|g| (model_transform.quat() * g.pos).z - camera.pos.z)
+            .map(|g| (model_transform.quat() * g.pos).z - control.pos.z)
             .fold(f32::INFINITY, |a, b| a.min(b));
 
         Self {
-            camera,
-            speed: Vec2::ONE,
+            control: CameraControl::FirstPerson(control),
+            speed: 1.0,
             sensitivity: 0.3,
         }
     }
@@ -434,9 +435,121 @@ impl Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            camera: gs::Camera::new(1e-4..1e4, 60f32.to_radians()),
-            speed: Vec2::ONE,
+            control: CameraControl::FirstPerson(CameraFirstPersonControl::new(
+                1e-4..1e4,
+                60f32.to_radians(),
+            )),
+            speed: 1.0,
             sensitivity: 0.3,
+        }
+    }
+}
+
+/// The first person camera control.
+pub type CameraFirstPersonControl = gs::Camera;
+
+/// The orbit camera control.
+#[derive(Debug, Clone)]
+pub struct CameraOrbitControl {
+    /// The target.
+    pub target: Vec3,
+
+    /// The position.
+    pub pos: Vec3,
+
+    /// The z range of the camera.
+    pub z: Range<f32>,
+
+    /// The vertical FOV.
+    pub vertical_fov: f32,
+}
+
+impl gs::CameraTrait for CameraOrbitControl {
+    fn view(&self) -> Mat4 {
+        Mat4::look_at_rh(self.pos, self.target, Vec3::Y)
+    }
+
+    fn projection(&self, aspect_ratio: f32) -> Mat4 {
+        Mat4::perspective_rh(self.vertical_fov, aspect_ratio, self.z.start, self.z.end)
+    }
+}
+
+/// The camera control.
+#[derive(Debug, Clone)]
+pub enum CameraControl {
+    /// The first person.
+    FirstPerson(CameraFirstPersonControl),
+
+    /// The orbit.
+    Orbit(CameraOrbitControl),
+}
+
+impl CameraControl {
+    /// Get the position.
+    pub fn pos(&self) -> Vec3 {
+        match self {
+            Self::FirstPerson(control) => control.pos,
+            Self::Orbit(control) => control.pos,
+        }
+    }
+
+    /// Get the position mutably.
+    pub fn pos_mut(&mut self) -> &mut Vec3 {
+        match self {
+            Self::FirstPerson(control) => &mut control.pos,
+            Self::Orbit(control) => &mut control.pos,
+        }
+    }
+
+    /// Convert into first person control.
+    pub fn to_first_person(&self) -> CameraFirstPersonControl {
+        match self {
+            Self::FirstPerson(first_person) => first_person.clone(),
+            Self::Orbit(orbit) => {
+                let pos = orbit.pos;
+                let direction = (orbit.target - pos).normalize();
+                let mut control =
+                    CameraFirstPersonControl::new(orbit.z.clone(), orbit.vertical_fov);
+                control.pos = pos;
+                control.yaw = direction.x.atan2(direction.z);
+                control.pitch = direction.y.asin();
+                control
+            }
+        }
+    }
+
+    /// Convert into orbit control.
+    pub fn to_orbit(&self, arm_length: f32) -> CameraOrbitControl {
+        match self {
+            Self::FirstPerson(first_person) => {
+                let pos = first_person.pos;
+                let target = pos + first_person.get_forward() * arm_length;
+                let z = first_person.z.start..first_person.z.end;
+                let vertical_fov = first_person.vertical_fov;
+                CameraOrbitControl {
+                    target,
+                    pos,
+                    z,
+                    vertical_fov,
+                }
+            }
+            Self::Orbit(orbit) => orbit.clone(),
+        }
+    }
+}
+
+impl gs::CameraTrait for CameraControl {
+    fn view(&self) -> Mat4 {
+        match self {
+            Self::FirstPerson(control) => control.view(),
+            Self::Orbit(control) => control.view(),
+        }
+    }
+
+    fn projection(&self, aspect_ratio: f32) -> Mat4 {
+        match self {
+            Self::FirstPerson(control) => control.projection(aspect_ratio),
+            Self::Orbit(control) => control.projection(aspect_ratio),
         }
     }
 }
