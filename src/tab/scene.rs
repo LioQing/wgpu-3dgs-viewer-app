@@ -52,34 +52,45 @@ impl Tab for Scene {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, state: &mut app::State) {
         let updated_gs = match &mut state.gs {
             app::Loadable::Unloaded(unloaded) => match unloaded.rx.try_recv() {
-                Ok(Ok(mut gs)) => {
-                    log::debug!("Gaussian splatting loaded");
+                Ok(Ok(mut gs)) => match SceneResource::new(
+                    frame.wgpu_render_state().expect("render state"),
+                    &gs.gaussians,
+                    &state.compressions,
+                ) {
+                    Ok(scene_resource) => {
+                        log::debug!("Gaussian splatting loaded");
 
-                    frame
-                        .wgpu_render_state()
-                        .expect("render state")
-                        .renderer
-                        .write()
-                        .callback_resources
-                        .insert(SceneResource::new(
-                            frame.wgpu_render_state().expect("render state"),
-                            &gs.gaussians,
-                        ));
+                        frame
+                            .wgpu_render_state()
+                            .expect("render state")
+                            .renderer
+                            .write()
+                            .callback_resources
+                            .insert(scene_resource);
 
-                    match self.loaded(ui, &mut gs) {
-                        false => None,
-                        true => Some(app::Loadable::loaded(gs)),
+                        match self.loaded(ui, &mut gs) {
+                            false => None,
+                            true => Some(app::Loadable::loaded(gs)),
+                        }
                     }
-                }
+                    Err(e) => {
+                        log::debug!("Error loading Gaussian splatting: {e}");
+
+                        unloaded.err = Some(e.to_string());
+                        self.empty(ui, &state.compressions, unloaded);
+
+                        Some(app::Loadable::error(e))
+                    }
+                },
                 Ok(Err(err)) => {
                     log::debug!("Error loading Gaussian splatting: {err}");
 
-                    self.empty(ui, unloaded);
+                    self.empty(ui, &state.compressions, unloaded);
 
                     Some(app::Loadable::error(err))
                 }
                 _ => {
-                    self.empty(ui, unloaded);
+                    self.empty(ui, &state.compressions, unloaded);
 
                     None
                 }
@@ -106,6 +117,7 @@ impl Scene {
     fn empty(
         &mut self,
         ui: &mut egui::Ui,
+        compressions: &app::Compressions,
         unloaded: &mut Unloaded<app::GaussianSplatting, String>,
     ) {
         ui.vertical_centered(|ui| {
@@ -116,6 +128,7 @@ impl Scene {
             if ui.button("Browse File").clicked() {
                 let tx = unloaded.tx.clone();
                 let ctx = ui.ctx().clone();
+                let compressions = compressions.clone();
                 let task = rfd::AsyncFileDialog::new()
                     .set_title("Open a PLY file")
                     .pick_file();
@@ -123,8 +136,12 @@ impl Scene {
                 util::exec_task(async move {
                     if let Some(file) = task.await {
                         let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplatting::new(file.file_name(), &mut reader)
-                            .map_err(|e| e.to_string());
+                        let gs = app::GaussianSplatting::new(
+                            file.file_name(),
+                            &compressions,
+                            &mut reader,
+                        )
+                        .map_err(|e| e.to_string());
 
                         tx.send(gs).expect("send gs");
                         ctx.request_repaint();
@@ -150,6 +167,7 @@ impl Scene {
                     [file] => Some(Ok(match cfg!(target_arch = "wasm32") {
                         true => app::GaussianSplatting::new(
                             file.name.clone(),
+                            compressions,
                             &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
                         )
                         .map_err(|e| e.to_string()),
@@ -159,6 +177,7 @@ impl Scene {
                             .and_then(|data| {
                                 app::GaussianSplatting::new(
                                     file.name.clone(),
+                                    compressions,
                                     &mut Cursor::new(data),
                                 )
                                 .map_err(|e| e.to_string())
@@ -186,6 +205,18 @@ impl Scene {
 
         ui.horizontal(|ui| {
             ui.label(format!("📦 Loaded: {}", gs.file_name));
+
+            ui.separator();
+
+            ui.label(format!(
+                "Model Size: {}",
+                util::human_readable_size(gs.model_size)
+            ));
+
+            ui.label(format!(
+                "Compressed Size: {}",
+                util::human_readable_size(gs.compressed_size)
+            ));
 
             ui.separator();
 
@@ -763,13 +794,220 @@ enum SceneInputWebEvent {
     PointerLockChange(bool),
 }
 
+/// The viewer with different compression settings.
+#[derive(Debug)]
+enum Viewer {
+    ShSingleCov3dSingle(gs::Viewer<gs::GaussianPodWithShSingleCov3dSingleConfigs>),
+    ShSingleCov3dHalf(gs::Viewer<gs::GaussianPodWithShSingleCov3dHalfConfigs>),
+    ShHalfCov3dSingle(gs::Viewer<gs::GaussianPodWithShHalfCov3dSingleConfigs>),
+    ShHalfCov3dHalf(gs::Viewer<gs::GaussianPodWithShHalfCov3dHalfConfigs>),
+    ShMinMaxNormCov3dSingle(gs::Viewer<gs::GaussianPodWithShMinMaxNormCov3dSingleConfigs>),
+    ShMinMaxNormCov3dHalf(gs::Viewer<gs::GaussianPodWithShMinMaxNormCov3dHalfConfigs>),
+    ShRemoveCov3dSingle(gs::Viewer<gs::GaussianPodWithShNoneCov3dSingleConfigs>),
+    ShRemoveCov3dHalf(gs::Viewer<gs::GaussianPodWithShNoneCov3dHalfConfigs>),
+}
+
+macro_rules! viewer_call {
+    ($self:expr, ref $field:ident) => {
+        match $self {
+            Self::ShSingleCov3dSingle(viewer) => &viewer.$field,
+            Self::ShSingleCov3dHalf(viewer) => &viewer.$field,
+            Self::ShHalfCov3dSingle(viewer) => &viewer.$field,
+            Self::ShHalfCov3dHalf(viewer) => &viewer.$field,
+            Self::ShMinMaxNormCov3dSingle(viewer) => &viewer.$field,
+            Self::ShMinMaxNormCov3dHalf(viewer) => &viewer.$field,
+            Self::ShRemoveCov3dSingle(viewer) => &viewer.$field,
+            Self::ShRemoveCov3dHalf(viewer) => &viewer.$field,
+        }
+    };
+    ($self:expr, ref mut $field:ident) => {
+        match $self {
+            Self::ShSingleCov3dSingle(viewer) => &mut viewer.$field,
+            Self::ShSingleCov3dHalf(viewer) => &mut viewer.$field,
+            Self::ShHalfCov3dSingle(viewer) => &mut viewer.$field,
+            Self::ShHalfCov3dHalf(viewer) => &mut viewer.$field,
+            Self::ShMinMaxNormCov3dSingle(viewer) => &mut viewer.$field,
+            Self::ShMinMaxNormCov3dHalf(viewer) => &mut viewer.$field,
+            Self::ShRemoveCov3dSingle(viewer) => &mut viewer.$field,
+            Self::ShRemoveCov3dHalf(viewer) => &mut viewer.$field,
+        }
+    };
+    ($self:expr, $field:ident) => {
+        match $self {
+            Self::ShSingleCov3dSingle(viewer) => viewer.$field,
+            Self::ShSingleCov3dHalf(viewer) => viewer.$field,
+            Self::ShHalfCov3dSingle(viewer) => viewer.$field,
+            Self::ShHalfCov3dHalf(viewer) => viewer.$field,
+            Self::ShMinMaxNormCov3dSingle(viewer) => viewer.$field,
+            Self::ShMinMaxNormCov3dHalf(viewer) => viewer.$field,
+            Self::ShRemoveCov3dSingle(viewer) => viewer.$field,
+            Self::ShRemoveCov3dHalf(viewer) => viewer.$field,
+        }
+    };
+    ($self:expr, fn $fn:ident, $($args:expr),*) => {
+        match $self {
+            Self::ShSingleCov3dSingle(viewer) => viewer.$fn($($args),*),
+            Self::ShSingleCov3dHalf(viewer) => viewer.$fn($($args),*),
+            Self::ShHalfCov3dSingle(viewer) => viewer.$fn($($args),*),
+            Self::ShHalfCov3dHalf(viewer) => viewer.$fn($($args),*),
+            Self::ShMinMaxNormCov3dSingle(viewer) => viewer.$fn($($args),*),
+            Self::ShMinMaxNormCov3dHalf(viewer) => viewer.$fn($($args),*),
+            Self::ShRemoveCov3dSingle(viewer) => viewer.$fn($($args),*),
+            Self::ShRemoveCov3dHalf(viewer) => viewer.$fn($($args),*),
+        }
+    };
+    ($self:expr, async fn $fn:ident, $($args:expr),*) => {
+        match $self {
+            Self::ShSingleCov3dSingle(viewer) => viewer.$fn($($args),*).await,
+            Self::ShSingleCov3dHalf(viewer) => viewer.$fn($($args),*).await,
+            Self::ShHalfCov3dSingle(viewer) => viewer.$fn($($args),*).await,
+            Self::ShHalfCov3dHalf(viewer) => viewer.$fn($($args),*).await,
+            Self::ShMinMaxNormCov3dSingle(viewer) => viewer.$fn($($args),*).await,
+            Self::ShMinMaxNormCov3dHalf(viewer) => viewer.$fn($($args),*).await,
+            Self::ShRemoveCov3dSingle(viewer) => viewer.$fn($($args),*).await,
+            Self::ShRemoveCov3dHalf(viewer) => viewer.$fn($($args),*).await,
+        }
+    };
+}
+
+macro_rules! viewer_getters {
+    ($field:ident) => {
+        paste::paste! {
+            pub fn $field(&self) -> &gs::[< $field:camel >] {
+                viewer_call!(self, ref $field)
+            }
+
+            pub fn [< $field _mut >](&mut self) -> &mut gs::[< $field:camel >] {
+                viewer_call!(self, ref mut $field)
+            }
+        }
+    };
+}
+
+#[allow(dead_code)]
+impl Viewer {
+    /// Create a new viewer.
+    pub fn new(
+        device: &wgpu::Device,
+        texture_format: wgpu::TextureFormat,
+        gaussians: &gs::Gaussians,
+        compressions: &app::Compressions,
+    ) -> Result<Self, gs::Error> {
+        macro_rules! case {
+            ($sh:ident, $cov3d:ident) => {
+                app::Compressions {
+                    sh: app::ShCompression::$sh,
+                    cov3d: app::Cov3dCompression::$cov3d,
+                }
+            };
+        }
+
+        macro_rules! new {
+            ($sh:ident, $cov3d:ident) => {paste::paste! {
+                Self::[<Sh $sh Cov3d $cov3d>](gs::Viewer::new(device, texture_format, gaussians)?)
+            }};
+        }
+
+        Ok(match compressions {
+            case!(Single, Single) => new!(Single, Single),
+            case!(Single, Half) => new!(Single, Half),
+            case!(Half, Single) => new!(Half, Single),
+            case!(Half, Half) => new!(Half, Half),
+            case!(MinMaxNorm, Single) => new!(MinMaxNorm, Single),
+            case!(MinMaxNorm, Half) => new!(MinMaxNorm, Half),
+            case!(Remove, Single) => new!(Remove, Single),
+            case!(Remove, Half) => new!(Remove, Half),
+        })
+    }
+
+    viewer_getters!(camera_buffer);
+    viewer_getters!(model_transform_buffer);
+    viewer_getters!(gaussian_transform_buffer);
+    viewer_getters!(indirect_args_buffer);
+    viewer_getters!(radix_sort_indirect_args_buffer);
+    viewer_getters!(indirect_indices_buffer);
+    viewer_getters!(gaussians_depth_buffer);
+    viewer_getters!(query_buffer);
+    viewer_getters!(query_result_count_buffer);
+    viewer_getters!(query_results_buffer);
+
+    viewer_getters!(preprocessor);
+    viewer_getters!(radix_sorter);
+    viewer_getters!(renderer);
+
+    /// Update the camera.
+    pub fn update_camera(
+        &mut self,
+        queue: &wgpu::Queue,
+        camera: &impl gs::CameraTrait,
+        texture_size: UVec2,
+    ) {
+        viewer_call!(self, fn update_camera, queue, camera, texture_size);
+    }
+
+    /// Update the query.
+    pub fn update_query(&mut self, queue: &wgpu::Queue, query: &gs::QueryPod) {
+        viewer_call!(self, fn update_query, queue, query);
+    }
+
+    /// Update the model transform.
+    pub fn update_model_transform(
+        &mut self,
+        queue: &wgpu::Queue,
+        pos: Vec3,
+        quat: Quat,
+        scale: Vec3,
+    ) {
+        viewer_call!(self, fn update_model_transform, queue, pos, quat, scale);
+    }
+
+    /// Update the Gaussian transform.
+    pub fn update_gaussian_transform(
+        &mut self,
+        queue: &wgpu::Queue,
+        size: f32,
+        display_mode: gs::GaussianDisplayMode,
+        sh_deg: gs::GaussianShDegree,
+        no_sh0: bool,
+    ) {
+        viewer_call!(
+            self,
+            fn update_gaussian_transform,
+            queue,
+            size,
+            display_mode,
+            sh_deg,
+            no_sh0
+        );
+    }
+
+    /// Render the viewer.
+    pub fn render(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture_view: &wgpu::TextureView,
+        gaussian_count: u32,
+    ) {
+        viewer_call!(self, fn render, encoder, texture_view, gaussian_count);
+    }
+
+    /// Download the query results from the GPU.
+    pub async fn download_query_results(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Vec<gs::QueryResultPod>, gs::Error> {
+        viewer_call!(self, async fn download_query_results, device, queue)
+    }
+}
+
 /// The scene resource.
 ///
 /// This is for the [`SceneCallback`].
 #[derive(Debug)]
 struct SceneResource {
     /// The viewer.
-    viewer: Arc<Mutex<gs::Viewer>>,
+    viewer: Arc<Mutex<Viewer>>,
 
     /// The measurement renderer.
     measurement_renderer: renderer::Measurement,
@@ -783,21 +1021,29 @@ struct SceneResource {
 
 impl SceneResource {
     /// Create a new scene resource.
-    fn new(render_state: &egui_wgpu::RenderState, gaussians: &gs::Gaussians) -> Self {
+    fn new(
+        render_state: &egui_wgpu::RenderState,
+        gaussians: &gs::Gaussians,
+        compressions: &app::Compressions,
+    ) -> Result<Self, String> {
         log::debug!("Creating viewer");
         // In WASM, the viewer is not Send nor Sync, but in native, it is.
         #[allow(clippy::arc_with_non_send_sync)]
-        let viewer = Arc::new(Mutex::new(gs::Viewer::new(
-            render_state.device.as_ref(),
-            render_state.target_format,
-            gaussians,
-        )));
+        let viewer = Arc::new(Mutex::new(
+            Viewer::new(
+                render_state.device.as_ref(),
+                render_state.target_format,
+                gaussians,
+                compressions,
+            )
+            .map_err(|e| e.to_string())?,
+        ));
 
         log::debug!("Creating measurement renderer");
         let measurement_renderer = renderer::Measurement::new(
             render_state.device.as_ref(),
             render_state.target_format,
-            &viewer.lock().expect("viewer").camera_buffer,
+            viewer.lock().expect("viewer").camera_buffer(),
         );
 
         log::debug!("Creating query resource");
@@ -805,11 +1051,11 @@ impl SceneResource {
 
         log::info!("Scene loaded");
 
-        Self {
+        Ok(Self {
             viewer,
             measurement_renderer,
             query_resource,
-        }
+        })
     }
 }
 
@@ -899,7 +1145,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         viewer
                             .lock()
                             .expect("viewer")
-                            .query_result_count_buffer
+                            .query_result_count_buffer()
                             .prepare_download(&mut encoder);
                         queue.submit(Some(encoder.finish()));
 
@@ -908,7 +1154,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                         viewer
                             .lock()
                             .expect("viewer")
-                            .query_result_count_buffer
+                            .query_result_count_buffer()
                             .download_buffer()
                             .slice(..)
                             .map_async(wgpu::MapMode::Read, {
@@ -918,7 +1164,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                         &viewer
                                             .lock()
                                             .expect("viewer")
-                                            .query_result_count_buffer
+                                            .query_result_count_buffer()
                                             .download_buffer()
                                             .slice(..)
                                             .get_mapped_range(),
@@ -926,7 +1172,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                     viewer
                                         .lock()
                                         .expect("viewer")
-                                        .query_result_count_buffer
+                                        .query_result_count_buffer()
                                         .download_buffer()
                                         .unmap();
 
@@ -954,7 +1200,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                                 viewer
                                     .lock()
                                     .expect("viewer")
-                                    .query_results_buffer
+                                    .query_results_buffer()
                                     .create_download_buffer(device, count),
                             );
 
@@ -965,7 +1211,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                             viewer
                                 .lock()
                                 .expect("viewer")
-                                .query_results_buffer
+                                .query_results_buffer()
                                 .prepare_download(&mut encoder, &download);
                             queue.submit(Some(encoder.finish()));
 
@@ -1131,13 +1377,15 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             queue,
             self.gaussian_transform.size,
             self.gaussian_transform.display_mode,
+            self.gaussian_transform.sh_deg,
+            self.gaussian_transform.no_sh0,
         );
 
         if !self.measurement_visible_hit_pairs.is_empty() {
             measurement_renderer.update_hit_pairs(
                 device,
                 &self.measurement_visible_hit_pairs,
-                &viewer.lock().expect("viewer").camera_buffer,
+                viewer.lock().expect("viewer").camera_buffer(),
             );
         }
 
@@ -1146,12 +1394,12 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             let viewer = viewer.lock().expect("viewer");
 
             viewer
-                .preprocessor
+                .preprocessor()
                 .preprocess(egui_encoder, self.gaussian_count as u32);
 
             viewer
-                .radix_sorter
-                .sort(egui_encoder, &viewer.radix_sort_indirect_args_buffer);
+                .radix_sorter()
+                .sort(egui_encoder, viewer.radix_sort_indirect_args_buffer());
         }
 
         vec![]
@@ -1173,8 +1421,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             let viewer = viewer.lock().expect("viewer");
 
             viewer
-                .renderer
-                .render_with_pass(render_pass, &viewer.indirect_args_buffer);
+                .renderer()
+                .render_with_pass(render_pass, viewer.indirect_args_buffer());
         }
 
         if !self.measurement_visible_hit_pairs.is_empty() {

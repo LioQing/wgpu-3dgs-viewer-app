@@ -820,6 +820,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "crunchy"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43da5946c66ffcc7745f48db692ffbb10a83bfe0afd96235c5c2a4fb23994929"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1550,6 +1556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "half"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dd08c532ae367adf81c312a4580bc67f1d0fe8bc9c460520283f4c0ff277888"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
+ "crunchy",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2252,9 +2269,9 @@ dependencies = [
 
 [[package]]
 name = "paste"
-version = "1.0.14"
+version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "percent-encoding"
@@ -3257,13 +3274,14 @@ dependencies = [
 [[package]]
 name = "wgpu-3dgs-viewer"
 version = "0.1.0"
-source = "git+https://github.com/LioQing/wgpu-3dgs-viewer.git#cad8871cf1acfff7a260ec7c30d02525eb0c80a7"
 dependencies = [
  "bitflags 2.8.0",
  "bytemuck",
  "glam",
+ "half",
  "log",
  "oneshot",
+ "paste",
  "thiserror 2.0.11",
  "wgpu",
 ]
@@ -3281,6 +3299,7 @@ dependencies = [
  "glam",
  "log",
  "oneshot",
+ "paste",
  "rfd",
  "serde",
  "strum",

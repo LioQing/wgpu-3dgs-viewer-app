@@ -18,7 +18,6 @@ pub struct App {
     tab_manager: tab::Manager,
 
     /// The state of the application.
-    #[serde(skip)]
     state: State,
 }
 
@@ -61,7 +60,7 @@ impl App {
     fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("Open model...").clicked() {
+                if ui.button("Open model").clicked() {
                     self.state.gs = Loadable::unloaded();
                     let Loadable::Unloaded(unloaded) = &mut self.state.gs else {
                         unreachable!()
@@ -69,6 +68,7 @@ impl App {
 
                     let tx = unloaded.tx.clone();
                     let ctx = ui.ctx().clone();
+                    let compressions = self.state.compressions.clone();
                     let task = rfd::AsyncFileDialog::new()
                         .set_title("Open a PLY file")
                         .pick_file();
@@ -76,8 +76,12 @@ impl App {
                     util::exec_task(async move {
                         if let Some(file) = task.await {
                             let mut reader = Cursor::new(file.read().await);
-                            let gs = GaussianSplatting::new(file.file_name(), &mut reader)
-                                .map_err(|e| e.to_string());
+                            let gs = GaussianSplatting::new(
+                                file.file_name(),
+                                &compressions,
+                                &mut reader,
+                            )
+                            .map_err(|e| e.to_string());
 
                             tx.send(gs).expect("send gs");
                             ctx.request_repaint();
@@ -94,6 +98,60 @@ impl App {
                     self.state.gs = Loadable::unloaded();
                     ui.close_menu();
                 }
+
+                ui.separator();
+
+                ui.menu_button("Compression Settings", |ui| {
+                    macro_rules! value {
+                        ($ui: expr, $value: expr, $label: expr, $display: expr) => {
+                            if $ui.selectable_label($value == $label, $display).clicked() {
+                                $value = $label;
+                            }
+                        };
+                    }
+
+                    ui.menu_button("Spherical Harmonics", |ui| {
+                        value!(
+                            ui,
+                            self.state.compressions.sh,
+                            ShCompression::Single,
+                            "Single Precision"
+                        );
+                        value!(
+                            ui,
+                            self.state.compressions.sh,
+                            ShCompression::Half,
+                            "Half Precision"
+                        );
+                        value!(
+                            ui,
+                            self.state.compressions.sh,
+                            ShCompression::MinMaxNorm,
+                            "Min-Max Normalization"
+                        );
+                        value!(
+                            ui,
+                            self.state.compressions.sh,
+                            ShCompression::Remove,
+                            "Remove"
+                        );
+                    });
+
+                    ui.menu_button("Covariance 3D", |ui| {
+                        value!(
+                            ui,
+                            self.state.compressions.cov3d,
+                            Cov3dCompression::Single,
+                            "Single Precision"
+                        );
+                        value!(
+                            ui,
+                            self.state.compressions.cov3d,
+                            Cov3dCompression::Half,
+                            "Half Precision"
+                        );
+                    });
+                });
 
                 if !cfg!(target_arch = "wasm32") {
                     ui.separator();
@@ -199,10 +257,48 @@ impl eframe::App for App {
 }
 
 /// The state of the main application.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct State {
     /// The Gaussian splatting model, which can be loaded from a file.
+    #[serde(skip)]
     pub gs: Loadable<GaussianSplatting, String>,
+
+    /// The compression settings.
+    pub compressions: Compressions,
+}
+
+/// The compression settings.
+#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Compressions {
+    /// The spherical harmonics compression.
+    pub sh: ShCompression,
+
+    /// The covariance 3D compression.
+    pub cov3d: Cov3dCompression,
+}
+
+/// The spherical harmonics compression settings.
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ShCompression {
+    /// No compression
+    Single,
+    /// Half precision
+    Half,
+    /// Min-max normalization
+    #[default]
+    MinMaxNorm,
+    /// Remove SH completely
+    Remove,
+}
+
+/// The covariance 3D compression settings.
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum Cov3dCompression {
+    /// No compression
+    Single,
+    /// Half precision
+    #[default]
+    Half,
 }
 
 /// An unloaded value.
@@ -284,6 +380,12 @@ pub struct GaussianSplatting {
     /// The file name of the opened Gaussian splatting model.
     pub file_name: String,
 
+    /// The original model size.
+    pub model_size: usize,
+
+    /// The compressed model size.
+    pub compressed_size: usize,
+
     /// The camera to view the model.
     pub camera: Camera,
 
@@ -302,7 +404,11 @@ pub struct GaussianSplatting {
 
 impl GaussianSplatting {
     /// Create a Gaussian splatting model from a PLY file.
-    pub fn new(file_name: String, ply: &mut impl BufRead) -> Result<Self, gs::Error> {
+    pub fn new(
+        file_name: String,
+        compressions: &Compressions,
+        ply: &mut impl BufRead,
+    ) -> Result<Self, gs::Error> {
         let measurement = Measurement::new();
 
         let gaussian_transform = GaussianSplattingGaussianTransform::new();
@@ -313,10 +419,43 @@ impl GaussianSplatting {
 
         let camera = Camera::new(&gaussians, &model_transform);
 
+        macro_rules! compressions_case {
+            ($sh:ident, $cov3d:ident) => {
+                Compressions {
+                    sh: ShCompression::$sh,
+                    cov3d: Cov3dCompression::$cov3d,
+                }
+            };
+        }
+
+        macro_rules! compressed_size {
+            ($sh:ident, $cov3d:ident) => {
+                paste::paste! {
+                    std::mem::size_of::<gs::[<GaussianPodWithSh $sh Cov3d $cov3d Configs>]>()
+                }
+            };
+        }
+
+        let compressed_size = gaussians.gaussians.len()
+            * match compressions {
+                compressions_case!(Single, Single) => compressed_size!(Single, Single),
+                compressions_case!(Single, Half) => compressed_size!(Single, Half),
+                compressions_case!(Half, Single) => compressed_size!(Half, Single),
+                compressions_case!(Half, Half) => compressed_size!(Half, Half),
+                compressions_case!(MinMaxNorm, Single) => compressed_size!(MinMaxNorm, Single),
+                compressions_case!(MinMaxNorm, Half) => compressed_size!(MinMaxNorm, Half),
+                compressions_case!(Remove, Single) => compressed_size!(None, Single),
+                compressions_case!(Remove, Half) => compressed_size!(None, Half),
+            };
+
+        let model_size = gaussians.gaussians.len() * std::mem::size_of::<gs::PlyGaussianPod>();
+
         log::info!("Gaussian splatting model loaded");
 
         Ok(Self {
             file_name,
+            model_size,
+            compressed_size,
             camera,
             gaussians,
             model_transform,
@@ -374,6 +513,12 @@ pub struct GaussianSplattingGaussianTransform {
 
     /// The display mode.
     pub display_mode: gs::GaussianDisplayMode,
+
+    /// The spherical harmonics degree.
+    pub sh_deg: gs::GaussianShDegree,
+
+    /// Whether the SH0 is disabled.
+    pub no_sh0: bool,
 }
 
 impl GaussianSplattingGaussianTransform {
@@ -382,6 +527,8 @@ impl GaussianSplattingGaussianTransform {
         Self {
             size: 1.0,
             display_mode: gs::GaussianDisplayMode::Splat,
+            sh_deg: gs::GaussianShDegree::new_unchecked(3),
+            no_sh0: false,
         }
     }
 }
@@ -411,21 +558,28 @@ impl Camera {
         gaussians: &gs::Gaussians,
         model_transform: &GaussianSplattingModelTransform,
     ) -> Self {
-        let mut control = CameraFirstPersonControl::new(1e-4..1e4, 60f32.to_radians());
-        control.pos = gaussians
+        let target = gaussians
             .gaussians
             .iter()
             .map(|g| model_transform.quat() * g.pos)
             .sum::<Vec3>()
             / gaussians.gaussians.len() as f32;
-        control.pos.z += gaussians
-            .gaussians
-            .iter()
-            .map(|g| (model_transform.quat() * g.pos).z - control.pos.z)
-            .fold(f32::INFINITY, |a, b| a.min(b));
+        let pos = target
+            + Vec3::Z
+                * gaussians
+                    .gaussians
+                    .iter()
+                    .map(|g| (model_transform.quat() * g.pos).z - target.z)
+                    .fold(f32::INFINITY, |a, b| a.min(b));
+        let control = CameraOrbitControl {
+            target,
+            pos,
+            z: 0.1..1e4,
+            vertical_fov: 60f32.to_radians(),
+        };
 
         Self {
-            control: CameraControl::FirstPerson(control),
+            control: CameraControl::Orbit(control),
             speed: 1.0,
             sensitivity: 0.3,
         }
@@ -435,18 +589,17 @@ impl Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            control: CameraControl::FirstPerson(CameraFirstPersonControl::new(
-                1e-4..1e4,
-                60f32.to_radians(),
-            )),
+            control: CameraControl::Orbit(CameraOrbitControl {
+                target: Vec3::ZERO,
+                pos: Vec3::ZERO,
+                z: 0.1..1e4,
+                vertical_fov: 60f32.to_radians(),
+            }),
             speed: 1.0,
             sensitivity: 0.3,
         }
     }
 }
-
-/// The first person camera control.
-pub type CameraFirstPersonControl = gs::Camera;
 
 /// The orbit camera control.
 #[derive(Debug, Clone)]
@@ -474,25 +627,20 @@ impl gs::CameraTrait for CameraOrbitControl {
     }
 }
 
+/// The first person camera control.
+pub type CameraFirstPersonControl = gs::Camera;
+
 /// The camera control.
 #[derive(Debug, Clone)]
 pub enum CameraControl {
-    /// The first person.
-    FirstPerson(CameraFirstPersonControl),
-
     /// The orbit.
     Orbit(CameraOrbitControl),
+
+    /// The first person.
+    FirstPerson(CameraFirstPersonControl),
 }
 
 impl CameraControl {
-    /// Get the position.
-    pub fn pos(&self) -> Vec3 {
-        match self {
-            Self::FirstPerson(control) => control.pos,
-            Self::Orbit(control) => control.pos,
-        }
-    }
-
     /// Get the position mutably.
     pub fn pos_mut(&mut self) -> &mut Vec3 {
         match self {

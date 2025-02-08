@@ -1,6 +1,6 @@
 use wgpu_3dgs_viewer as gs;
 
-use crate::app;
+use crate::{app, util};
 
 use super::Tab;
 
@@ -121,6 +121,17 @@ impl Transform {
                 value!(ui, transform.display_mode, Ellipse);
                 value!(ui, transform.display_mode, Point);
             });
+            ui.end_row();
+
+            ui.label("SH Degree");
+            let mut deg = transform.sh_deg.degree();
+            ui.add(egui::Slider::new(&mut deg, 0..=3));
+            transform.sh_deg = gs::GaussianShDegree::new(deg).expect("SH degree");
+            ui.end_row();
+
+            ui.label("No SH0");
+            ui.add(util::toggle(&mut transform.no_sh0));
+            ui.end_row();
         });
     }
 }

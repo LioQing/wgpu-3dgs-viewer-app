@@ -72,16 +72,10 @@ fn wgpu_configuration() -> egui_wgpu::WgpuConfiguration {
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew {
             supported_backends: wgpu::Backends::PRIMARY,
             power_preference: wgpu::PowerPreference::HighPerformance,
-            device_descriptor: Arc::new(|_| {
-                wgpu::DeviceDescriptor {
-                    label: Some("Device"),
-                    required_limits: wgpu::Limits {
-                        // Radix sort requires higher than default limits
-                        max_compute_workgroup_storage_size: 17408, // 1024 * 17
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
+            device_descriptor: Arc::new(|adapter| wgpu::DeviceDescriptor {
+                label: Some("Device"),
+                required_limits: adapter.limits(),
+                ..Default::default()
             }),
         },
         ..Default::default()
