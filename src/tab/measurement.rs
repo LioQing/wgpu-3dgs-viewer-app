@@ -21,10 +21,13 @@ impl Tab for Measurement {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
-        let (measurement, ui_builder) = match &mut state.gs {
-            app::Loadable::Loaded(gs) => (&mut gs.measurement, egui::UiBuilder::new()),
+        let (measurement, action, ui_builder) = match &mut state.gs {
+            app::Loadable::Loaded(gs) => {
+                (&mut gs.measurement, &mut gs.action, egui::UiBuilder::new())
+            }
             app::Loadable::Unloaded { .. } => (
                 &mut app::Measurement::new(),
+                &mut None,
                 egui::UiBuilder::new().disabled(),
             ),
         };
@@ -32,7 +35,7 @@ impl Tab for Measurement {
         ui.spacing_mut().item_spacing = egui::vec2(ui.spacing().item_spacing.x, 12.0);
 
         ui.scope_builder(ui_builder, |ui| {
-            egui::Grid::new("measurement_method_grid").show(ui, |ui| {
+            egui::Grid::new("measurement_grid").show(ui, |ui| {
                 ui.label("Hit Method");
                 ui.horizontal(|ui| {
                     macro_rules! value {
@@ -58,7 +61,7 @@ impl Tab for Measurement {
 
             let mut removed = Vec::new();
             for (index, hit_pair) in measurement.hit_pairs.iter_mut().enumerate() {
-                if !self.measurement(ui, index, &mut measurement.action, hit_pair) {
+                if !self.measurement(ui, index, action, hit_pair) {
                     removed.push(index);
                 }
             }
@@ -87,7 +90,7 @@ impl Measurement {
         &mut self,
         ui: &mut egui::Ui,
         index: usize,
-        action: &mut Option<app::MeasurementAction>,
+        action: &mut Option<app::Action>,
         hit_pair: &mut app::MeasurementHitPair,
     ) -> bool {
         egui::CollapsingHeader::new(format!("{index}. {}", hit_pair.label))
@@ -147,7 +150,7 @@ impl Measurement {
                                 value!(ui, hit_pair.hits[i].pos.z);
 
                                 match action {
-                                    Some(app::MeasurementAction::LocateHit {
+                                    Some(app::Action::MeasurementLocateHit {
                                         hit_pair_index,
                                         hit_index,
                                         ..
@@ -156,10 +159,10 @@ impl Measurement {
                                             *action = None;
                                         }
                                     }
-                                    None | Some(app::MeasurementAction::LocateHit { .. }) => {
+                                    _ => {
                                         if ui.button("Locate").clicked() {
                                             let (tx, rx) = mpsc::channel();
-                                            *action = Some(app::MeasurementAction::LocateHit {
+                                            *action = Some(app::Action::MeasurementLocateHit {
                                                 hit_pair_index: index,
                                                 hit_index: i,
                                                 tx,

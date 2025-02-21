@@ -13,6 +13,7 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 [dependencies]
 egui = { version = "0.30", features = ["serde"] }
 egui_dock = { version = "0.15", features = ["serde"] }
+egui-modal = "0.6.0"
 eframe = { version = "0.30", default-features = false, features = [
     "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
@@ -25,7 +26,11 @@ serde = { version = "1.0.217", features = ["derive"] }
 strum = { version = "0.26", features = ["derive"] }
 glam = { version = "0.29.2", features = ["bytemuck"] }
 rfd = "0.15.2"
-wgpu-3dgs-viewer = { git = "https://github.com/LioQing/wgpu-3dgs-viewer.git" }
+wgpu-3dgs-viewer = { path = "../wgpu-3dgs-viewer", features = [
+    "query-toolset",
+    "query-texture-overlay",
+    "query-cursor",
+] }
 bytemuck = "1.21.0"
 oneshot = "0.1.9"
 paste = "1.0.15"

@@ -5,7 +5,7 @@ use std::{
 };
 
 use glam::*;
-use strum::{EnumCount, EnumIter};
+use strum::{Display, EnumCount, EnumIter, IntoEnumIterator};
 use wgpu_3dgs_viewer as gs;
 
 use crate::{tab, util};
@@ -68,7 +68,6 @@ impl App {
 
                     let tx = unloaded.tx.clone();
                     let ctx = ui.ctx().clone();
-                    let compressions = self.state.compressions.clone();
                     let task = rfd::AsyncFileDialog::new()
                         .set_title("Open a PLY file")
                         .pick_file();
@@ -76,12 +75,8 @@ impl App {
                     util::exec_task(async move {
                         if let Some(file) = task.await {
                             let mut reader = Cursor::new(file.read().await);
-                            let gs = GaussianSplatting::new(
-                                file.file_name(),
-                                &compressions,
-                                &mut reader,
-                            )
-                            .map_err(|e| e.to_string());
+                            let gs = GaussianSplatting::new(file.file_name(), &mut reader)
+                                .map_err(|e| e.to_string());
 
                             tx.send(gs).expect("send gs");
                             ctx.request_repaint();
@@ -111,45 +106,20 @@ impl App {
                     }
 
                     ui.menu_button("Spherical Harmonics", |ui| {
-                        value!(
-                            ui,
-                            self.state.compressions.sh,
-                            ShCompression::Single,
-                            "Single Precision"
-                        );
-                        value!(
-                            ui,
-                            self.state.compressions.sh,
-                            ShCompression::Half,
-                            "Half Precision"
-                        );
-                        value!(
-                            ui,
-                            self.state.compressions.sh,
-                            ShCompression::MinMaxNorm,
-                            "Min-Max Normalization"
-                        );
-                        value!(
-                            ui,
-                            self.state.compressions.sh,
-                            ShCompression::Remove,
-                            "Remove"
-                        );
+                        for sh in ShCompression::iter() {
+                            value!(ui, self.state.compressions.sh, sh, sh.to_string().as_str());
+                        }
                     });
 
                     ui.menu_button("Covariance 3D", |ui| {
-                        value!(
-                            ui,
-                            self.state.compressions.cov3d,
-                            Cov3dCompression::Single,
-                            "Single Precision"
-                        );
-                        value!(
-                            ui,
-                            self.state.compressions.cov3d,
-                            Cov3dCompression::Half,
-                            "Half Precision"
-                        );
+                        for cov3d in Cov3dCompression::iter() {
+                            value!(
+                                ui,
+                                self.state.compressions.cov3d,
+                                cov3d,
+                                cov3d.to_string().as_str()
+                            );
+                        }
                     });
                 });
 
@@ -277,27 +247,71 @@ pub struct Compressions {
     pub cov3d: Cov3dCompression,
 }
 
+impl Compressions {
+    /// Calculate the compressed size.
+    pub fn compressed_size(&self, gaussian_count: usize) -> usize {
+        macro_rules! compressions_case {
+            ($sh:ident, $cov3d:ident) => {
+                Compressions {
+                    sh: ShCompression::$sh,
+                    cov3d: Cov3dCompression::$cov3d,
+                }
+            };
+        }
+
+        macro_rules! compressed_size {
+            ($sh:ident, $cov3d:ident) => {
+                paste::paste! {
+                    std::mem::size_of::<gs::[<GaussianPodWithSh $sh Cov3d $cov3d Configs>]>()
+                }
+            };
+        }
+
+        gaussian_count
+            * match self {
+                compressions_case!(Single, Single) => compressed_size!(Single, Single),
+                compressions_case!(Single, Half) => compressed_size!(Single, Half),
+                compressions_case!(Half, Single) => compressed_size!(Half, Single),
+                compressions_case!(Half, Half) => compressed_size!(Half, Half),
+                compressions_case!(Norm8, Single) => compressed_size!(Norm8, Single),
+                compressions_case!(Norm8, Half) => compressed_size!(Norm8, Half),
+                compressions_case!(Remove, Single) => compressed_size!(None, Single),
+                compressions_case!(Remove, Half) => compressed_size!(None, Half),
+            }
+    }
+}
+
 /// The spherical harmonics compression settings.
-#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, EnumIter, Display, serde::Deserialize, serde::Serialize,
+)]
 pub enum ShCompression {
     /// No compression
+    #[strum(to_string = "Single Precision")]
     Single,
     /// Half precision
+    #[strum(to_string = "Half Precision")]
     Half,
-    /// Min-max normalization
+    /// 8 bit normalization
     #[default]
-    MinMaxNorm,
+    #[strum(to_string = "8-bit Normalization")]
+    Norm8,
     /// Remove SH completely
+    #[strum(to_string = "Remove")]
     Remove,
 }
 
 /// The covariance 3D compression settings.
-#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, EnumIter, Display, serde::Deserialize, serde::Serialize,
+)]
 pub enum Cov3dCompression {
     /// No compression
+    #[strum(to_string = "Single Precision")]
     Single,
     /// Half precision
     #[default]
+    #[strum(to_string = "Half Precision")]
     Half,
 }
 
@@ -342,30 +356,6 @@ impl<T, E> Loadable<T, E> {
     pub fn is_loaded(&self) -> bool {
         matches!(self, Self::Loaded(_))
     }
-
-    /// Get the loaded value.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the value is not loaded.
-    pub fn unwrap(self) -> T {
-        match self {
-            Self::Loaded(value) => value,
-            _ => panic!("value not loaded"),
-        }
-    }
-
-    /// Converts from `&mut Loadable<T, E>` to `Loadable<&mut T, E>`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the value is not loaded.
-    pub fn as_mut(&mut self) -> Loadable<&mut T, E> {
-        match self {
-            Self::Loaded(value) => Loadable::loaded(value),
-            _ => panic!("value not loaded"),
-        }
-    }
 }
 
 impl<T, E> Default for Loadable<T, E> {
@@ -380,12 +370,6 @@ pub struct GaussianSplatting {
     /// The file name of the opened Gaussian splatting model.
     pub file_name: String,
 
-    /// The original model size.
-    pub model_size: usize,
-
-    /// The compressed model size.
-    pub compressed_size: usize,
-
     /// The camera to view the model.
     pub camera: Camera,
 
@@ -398,17 +382,21 @@ pub struct GaussianSplatting {
     /// The Gaussian transform.
     pub gaussian_transform: GaussianSplattingGaussianTransform,
 
+    /// The current action.
+    pub action: Option<Action>,
+
     /// The measurement of the Gaussian splatting.
     pub measurement: Measurement,
+
+    /// The selection of the Gaussian splatting.
+    pub selection: Selection,
 }
 
 impl GaussianSplatting {
     /// Create a Gaussian splatting model from a PLY file.
-    pub fn new(
-        file_name: String,
-        compressions: &Compressions,
-        ply: &mut impl BufRead,
-    ) -> Result<Self, gs::Error> {
+    pub fn new(file_name: String, ply: &mut impl BufRead) -> Result<Self, gs::Error> {
+        let selection = Selection::new();
+
         let measurement = Measurement::new();
 
         let gaussian_transform = GaussianSplattingGaussianTransform::new();
@@ -419,50 +407,52 @@ impl GaussianSplatting {
 
         let camera = Camera::new(&gaussians, &model_transform);
 
-        macro_rules! compressions_case {
-            ($sh:ident, $cov3d:ident) => {
-                Compressions {
-                    sh: ShCompression::$sh,
-                    cov3d: Cov3dCompression::$cov3d,
-                }
-            };
-        }
-
-        macro_rules! compressed_size {
-            ($sh:ident, $cov3d:ident) => {
-                paste::paste! {
-                    std::mem::size_of::<gs::[<GaussianPodWithSh $sh Cov3d $cov3d Configs>]>()
-                }
-            };
-        }
-
-        let compressed_size = gaussians.gaussians.len()
-            * match compressions {
-                compressions_case!(Single, Single) => compressed_size!(Single, Single),
-                compressions_case!(Single, Half) => compressed_size!(Single, Half),
-                compressions_case!(Half, Single) => compressed_size!(Half, Single),
-                compressions_case!(Half, Half) => compressed_size!(Half, Half),
-                compressions_case!(MinMaxNorm, Single) => compressed_size!(MinMaxNorm, Single),
-                compressions_case!(MinMaxNorm, Half) => compressed_size!(MinMaxNorm, Half),
-                compressions_case!(Remove, Single) => compressed_size!(None, Single),
-                compressions_case!(Remove, Half) => compressed_size!(None, Half),
-            };
-
-        let model_size = gaussians.gaussians.len() * std::mem::size_of::<gs::PlyGaussianPod>();
-
         log::info!("Gaussian splatting model loaded");
 
         Ok(Self {
             file_name,
-            model_size,
-            compressed_size,
             camera,
             gaussians,
             model_transform,
             gaussian_transform,
+            action: None,
             measurement,
+            selection,
         })
     }
+}
+
+/// The action.
+#[derive(Debug)]
+pub enum Action {
+    /// Locating a hit for measurement.
+    MeasurementLocateHit {
+        /// The index of the hit pair.
+        hit_pair_index: usize,
+
+        /// The index of the hit.
+        ///
+        /// Must be 0 or 1.
+        hit_index: usize,
+
+        /// The sender to send the result.
+        tx: Sender<Vec3>,
+
+        /// The receiver to receive the result.
+        rx: Receiver<Vec3>,
+    },
+
+    /// Selecting.
+    Selection {
+        /// The method.
+        method: SelectionMethod,
+
+        /// Whether the selection is immediate.
+        immediate: bool,
+
+        /// The brush radius.
+        brush_radius: u32,
+    },
 }
 
 /// The Gaussian splatting model transform.
@@ -710,9 +700,6 @@ pub struct Measurement {
 
     /// The hit method.
     pub hit_method: MeasurementHitMethod,
-
-    /// The current measurement action.
-    pub action: Option<MeasurementAction>,
 }
 
 impl Measurement {
@@ -725,27 +712,6 @@ impl Measurement {
     pub fn visible_hit_pairs(&self) -> impl Iterator<Item = &MeasurementHitPair> + '_ {
         self.hit_pairs.iter().filter(|hit_pair| hit_pair.visible)
     }
-}
-
-/// The measurement action.
-#[derive(Debug)]
-pub enum MeasurementAction {
-    /// Locating a hit.
-    LocateHit {
-        /// The index of the hit pair.
-        hit_pair_index: usize,
-
-        /// The index of the hit.
-        ///
-        /// Must be 0 or 1.
-        hit_index: usize,
-
-        /// The sender to send the result.
-        tx: Sender<Vec3>,
-
-        /// The receiver to receive the result.
-        rx: Receiver<Vec3>,
-    },
 }
 
 /// The measurement hit method.
@@ -807,4 +773,44 @@ impl Default for MeasurementHit {
     fn default() -> Self {
         Self { pos: Vec3::ZERO }
     }
+}
+
+/// The selection.
+#[derive(Debug)]
+pub struct Selection {
+    /// The brush radius.
+    pub brush_radius: u32,
+
+    /// Whether the selection is immediate.
+    pub immediate: bool,
+
+    /// The selection method.
+    pub method: SelectionMethod,
+}
+
+impl Selection {
+    /// Create a new selection.
+    pub fn new() -> Self {
+        Self {
+            brush_radius: 40,
+            immediate: false,
+            method: SelectionMethod::Rect,
+        }
+    }
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The selection method.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SelectionMethod {
+    /// The rectangle selection.
+    Rect,
+
+    /// The brush selection.
+    Brush,
 }

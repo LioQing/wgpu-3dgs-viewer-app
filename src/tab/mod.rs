@@ -1,15 +1,18 @@
-use egui::ahash::HashMap;
+use std::collections::HashMap;
+
 use strum::{EnumCount, EnumIter, IntoEnumIterator};
 
 mod camera;
 mod measurement;
 mod scene;
+mod selection;
 mod transform;
 
 use crate::app;
 use camera::Camera;
 use measurement::Measurement;
 use scene::Scene;
+use selection::Selection;
 use transform::Transform;
 
 /// The type of tab.
@@ -30,6 +33,7 @@ pub enum Type {
     Transform,
     Camera,
     Measurement,
+    Selection,
 }
 
 impl Type {
@@ -40,6 +44,7 @@ impl Type {
             Self::Transform => "Transform",
             Self::Camera => "Camera",
             Self::Measurement => "Measurement",
+            Self::Selection => "Selection",
         }
     }
 }
@@ -58,19 +63,20 @@ pub struct Manager {
 impl Manager {
     /// Create a new tab manager.
     pub fn new() -> Self {
-        let dock_state = egui_dock::DockState::new(vec![Type::Scene]);
-        let tabs = [
-            (
-                Type::Scene,
-                Box::new(Scene::create(&mut app::State::default())) as Box<dyn Tab>,
-            ),
-            (
-                Type::Transform,
-                Box::new(Transform::create(&mut app::State::default())) as Box<dyn Tab>,
-            ),
-        ]
-        .into_iter()
-        .collect();
+        let mut dock_state = egui_dock::DockState::new(vec![Type::Scene]);
+
+        let [_, inspector] = dock_state.main_surface_mut().split_right(
+            egui_dock::NodeIndex::root(),
+            0.7,
+            vec![Type::Transform, Type::Camera],
+        );
+        let [_, _] = dock_state.main_surface_mut().split_below(
+            inspector,
+            0.5,
+            vec![Type::Selection, Type::Measurement],
+        );
+
+        let tabs = HashMap::new();
 
         Self { dock_state, tabs }
     }
@@ -173,6 +179,7 @@ impl Viewer<'_> {
             Type::Transform => Box::new(Transform::create(self.state)) as Box<dyn Tab>,
             Type::Camera => Box::new(Camera::create(self.state)) as Box<dyn Tab>,
             Type::Measurement => Box::new(Measurement::create(self.state)) as Box<dyn Tab>,
+            Type::Selection => Box::new(Selection::create(self.state)) as Box<dyn Tab>,
         });
     }
 }

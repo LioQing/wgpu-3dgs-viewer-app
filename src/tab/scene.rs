@@ -11,7 +11,8 @@ use eframe::{
     wgpu::{self},
 };
 use glam::*;
-use wgpu_3dgs_viewer as gs;
+use strum::IntoEnumIterator;
+use wgpu_3dgs_viewer::{self as gs, QueryVariant, Texture};
 
 use crate::{
     app::{self, Unloaded},
@@ -31,6 +32,18 @@ pub struct Scene {
 
     /// The previous FPS.
     fps: f32,
+
+    /// The original model size.
+    original_size: usize,
+
+    /// The compressed model size.
+    compressed_size: usize,
+
+    /// Is scene initialized, i.e. viewer is created.
+    initialized: bool,
+
+    /// The current query.
+    query: Query,
 }
 
 impl Tab for Scene {
@@ -42,6 +55,10 @@ impl Tab for Scene {
             input: SceneInput::new(),
             fps_interval: 0.0,
             fps: 0.0,
+            original_size: 0,
+            compressed_size: 0,
+            initialized: false,
+            query: Query::none(),
         }
     }
 
@@ -52,58 +69,42 @@ impl Tab for Scene {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, state: &mut app::State) {
         let updated_gs = match &mut state.gs {
             app::Loadable::Unloaded(unloaded) => match unloaded.rx.try_recv() {
-                Ok(Ok(mut gs)) => match SceneResource::new(
-                    frame.wgpu_render_state().expect("render state"),
-                    &gs.gaussians,
-                    &state.compressions,
-                ) {
-                    Ok(scene_resource) => {
-                        log::debug!("Gaussian splatting loaded");
+                Ok(Ok(gs)) => {
+                    log::debug!("Gaussian splatting loaded");
 
-                        frame
-                            .wgpu_render_state()
-                            .expect("render state")
-                            .renderer
-                            .write()
-                            .callback_resources
-                            .insert(scene_resource);
+                    self.initialized = false;
+                    self.empty(ui, unloaded);
 
-                        match self.loaded(ui, &mut gs) {
-                            false => None,
-                            true => Some(app::Loadable::loaded(gs)),
-                        }
-                    }
-                    Err(e) => {
-                        log::debug!("Error loading Gaussian splatting: {e}");
-
-                        unloaded.err = Some(e.to_string());
-                        self.empty(ui, &state.compressions, unloaded);
-
-                        Some(app::Loadable::error(e))
-                    }
-                },
+                    Some(app::Loadable::loaded(gs))
+                }
                 Ok(Err(err)) => {
                     log::debug!("Error loading Gaussian splatting: {err}");
 
-                    self.empty(ui, &state.compressions, unloaded);
+                    self.empty(ui, unloaded);
 
                     Some(app::Loadable::error(err))
                 }
                 _ => {
-                    self.empty(ui, &state.compressions, unloaded);
+                    self.empty(ui, unloaded);
 
                     None
                 }
             },
-            app::Loadable::Loaded(_) => {
-                let loaded = self.loaded(ui, state.gs.as_mut().unwrap());
-
-                if !loaded {
-                    Some(app::Loadable::unloaded())
-                } else {
-                    None
-                }
-            }
+            app::Loadable::Loaded(gs) => match self.initialized {
+                false => match self.initialize(ui, frame, gs, &mut state.compressions) {
+                    Ok(Some(true)) => {
+                        self.initialized = true;
+                        None
+                    }
+                    Ok(Some(false)) => Some(app::Loadable::unloaded()),
+                    Ok(None) => None,
+                    Err(e) => Some(app::Loadable::error(e)),
+                },
+                true => match self.loaded(ui, gs) {
+                    true => None,
+                    false => Some(app::Loadable::unloaded()),
+                },
+            },
         };
 
         if let Some(gs) = updated_gs {
@@ -117,18 +118,16 @@ impl Scene {
     fn empty(
         &mut self,
         ui: &mut egui::Ui,
-        compressions: &app::Compressions,
         unloaded: &mut Unloaded<app::GaussianSplatting, String>,
     ) {
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.4);
+            ui.add_space(ui.spacing().item_spacing.y);
 
             ui.label("Drag & Drop");
             ui.label("OR");
             if ui.button("Browse File").clicked() {
                 let tx = unloaded.tx.clone();
                 let ctx = ui.ctx().clone();
-                let compressions = compressions.clone();
                 let task = rfd::AsyncFileDialog::new()
                     .set_title("Open a PLY file")
                     .pick_file();
@@ -136,12 +135,8 @@ impl Scene {
                 util::exec_task(async move {
                     if let Some(file) = task.await {
                         let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplatting::new(
-                            file.file_name(),
-                            &compressions,
-                            &mut reader,
-                        )
-                        .map_err(|e| e.to_string());
+                        let gs = app::GaussianSplatting::new(file.file_name(), &mut reader)
+                            .map_err(|e| e.to_string());
 
                         tx.send(gs).expect("send gs");
                         ctx.request_repaint();
@@ -167,7 +162,6 @@ impl Scene {
                     [file] => Some(Ok(match cfg!(target_arch = "wasm32") {
                         true => app::GaussianSplatting::new(
                             file.name.clone(),
-                            compressions,
                             &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
                         )
                         .map_err(|e| e.to_string()),
@@ -177,7 +171,6 @@ impl Scene {
                             .and_then(|data| {
                                 app::GaussianSplatting::new(
                                     file.name.clone(),
-                                    compressions,
                                     &mut Cursor::new(data),
                                 )
                                 .map_err(|e| e.to_string())
@@ -209,13 +202,13 @@ impl Scene {
             ui.separator();
 
             ui.label(format!(
-                "Model Size: {}",
-                util::human_readable_size(gs.model_size)
+                "Original Size: {}",
+                util::human_readable_size(self.original_size)
             ));
 
             ui.label(format!(
                 "Compressed Size: {}",
-                util::human_readable_size(gs.compressed_size)
+                util::human_readable_size(self.compressed_size)
             ));
 
             ui.separator();
@@ -238,7 +231,7 @@ impl Scene {
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
 
-            let query = self.input.handle(ui, gs, &rect, &response);
+            self.input.handle(ui, gs, &mut self.query, &rect, &response);
 
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 rect,
@@ -253,12 +246,168 @@ impl Scene {
                     camera: gs.camera.control.clone(),
                     viewer_size: Vec2::from_array(rect.size().into()),
                     gaussian_count: gs.gaussians.gaussians.len(),
-                    query,
+                    query: self.query.clone(),
                 },
             ));
         });
 
         loaded
+    }
+
+    /// Initialize the scene.
+    ///
+    /// Gaussians loaded, currently selecting compression settings for viewer.
+    ///
+    /// Returns true if confirmed, false if cancelled, [`None`] if not yet confirmed.
+    fn initialize(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        gs: &mut app::GaussianSplatting,
+        compressions: &mut app::Compressions,
+    ) -> Result<Option<bool>, String> {
+        egui::Modal::new(egui::Id::new("initialize_scene_modal"))
+            .show(ui.ctx(), |ui| {
+                ui.add(egui::Label::new(
+                    egui::RichText::new("Model loaded successfully ✅").heading(),
+                ));
+                ui.separator();
+                ui.label("Please confirm the settings for initializing the scene");
+                ui.label("");
+
+                egui::Grid::new("initialize_scene_grid")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new("Property").strong()));
+                        ui.add(egui::Label::new(
+                            egui::RichText::new("Compression").strong(),
+                        ));
+                        ui.add(egui::Label::new(egui::RichText::new("Size").strong()));
+                        ui.end_row();
+
+                        ui.label("Position");
+                        ui.label("N/A");
+                        ui.label(util::human_readable_size(
+                            std::mem::size_of::<Vec3>() * gs.gaussians.gaussians.len(),
+                        ));
+                        ui.end_row();
+
+                        ui.label("Color");
+                        ui.label("N/A");
+                        ui.label(util::human_readable_size(
+                            std::mem::size_of::<U8Vec4>() * gs.gaussians.gaussians.len(),
+                        ));
+                        ui.end_row();
+
+                        ui.label("Spherical Harmonics");
+                        egui::ComboBox::from_id_salt("initialize_scene_sh_compression")
+                            .width(150.0)
+                            .selected_text(compressions.sh.to_string())
+                            .show_ui(ui, |ui| {
+                                for sh in app::ShCompression::iter() {
+                                    ui.selectable_value(&mut compressions.sh, sh, sh.to_string());
+                                }
+                            });
+                        ui.label(util::human_readable_size(
+                            match compressions.sh {
+                                app::ShCompression::Single => std::mem::size_of::<
+                                    <gs::GaussianShSingleConfig as gs::GaussianShConfig>::Field,
+                                >(),
+                                app::ShCompression::Half => std::mem::size_of::<
+                                    <gs::GaussianShHalfConfig as gs::GaussianShConfig>::Field,
+                                >(),
+                                app::ShCompression::Norm8 => std::mem::size_of::<
+                                    <gs::GaussianShNorm8Config as gs::GaussianShConfig>::Field,
+                                >(),
+                                app::ShCompression::Remove => std::mem::size_of::<
+                                    <gs::GaussianShNoneConfig as gs::GaussianShConfig>::Field,
+                                >(),
+                            } * gs.gaussians.gaussians.len(),
+                        ));
+                        ui.end_row();
+
+                        ui.label("Covariance 3D");
+                        egui::ComboBox::from_id_salt("loading_scene_cov3d_compression")
+                            .width(150.0)
+                            .selected_text(compressions.cov3d.to_string())
+                            .show_ui(ui, |ui| {
+                                for cov3d in app::Cov3dCompression::iter() {
+                                    ui.selectable_value(
+                                        &mut compressions.cov3d,
+                                        cov3d,
+                                        cov3d.to_string(),
+                                    );
+                                }
+                            });
+                        ui.label(util::human_readable_size(
+                            match compressions.cov3d {
+                                app::Cov3dCompression::Single => std::mem::size_of::<
+                                    <gs::GaussianCov3dSingleConfig as gs::GaussianCov3dConfig>::Field,
+                                >(),
+                                app::Cov3dCompression::Half => std::mem::size_of::<
+                                    <gs::GaussianCov3dHalfConfig as gs::GaussianCov3dConfig>::Field,
+                                >(),
+                            } * gs.gaussians.gaussians.len(),
+                        ));
+                        ui.end_row();
+                    });
+
+                ui.label("");
+                ui.label(format!(
+                    "Original Size: {}",
+                    util::human_readable_size(
+                        gs.gaussians.gaussians.len() * std::mem::size_of::<gs::PlyGaussianPod>()
+                    )
+                ));
+                ui.label(format!(
+                    "Compressed Size: {}",
+                    util::human_readable_size(
+                        compressions.compressed_size(gs.gaussians.gaussians.len())
+                    )
+                ));
+                ui.label("");
+
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm").clicked() {
+                        self.original_size =
+                            gs.gaussians.gaussians.len() * std::mem::size_of::<gs::PlyGaussianPod>();
+                        self.compressed_size =
+                            compressions.compressed_size(gs.gaussians.gaussians.len());
+
+                        match SceneResource::new(
+                            frame.wgpu_render_state().expect("render state"),
+                            &gs.gaussians,
+                            compressions,
+                        ) {
+                            Ok(scene_resource) => {
+                                log::debug!("Scene resource initialized");
+
+                                frame
+                                    .wgpu_render_state()
+                                    .expect("render state")
+                                    .renderer
+                                    .write()
+                                    .callback_resources
+                                    .insert(scene_resource);
+
+                                return Ok(Some(true));
+                            }
+                            Err(e) => {
+                                log::debug!("Error initializing scene resource: {e}");
+
+                                return Err(e.to_string());
+                            }
+                        }
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        return Ok(Some(false));
+                    }
+
+                    Ok(None)
+                }).inner
+            })
+            .inner
     }
 }
 
@@ -291,14 +440,15 @@ impl SceneInput {
         &mut self,
         ui: &mut egui::Ui,
         gs: &mut app::GaussianSplatting,
+        query: &mut Query,
         rect: &egui::Rect,
         response: &egui::Response,
-    ) -> Query {
+    ) {
         #[cfg(target_arch = "wasm32")]
         let web_result = self.web_event_listener.update();
 
-        if gs.measurement.action.is_some() {
-            return self.measure(ui, gs, rect, response);
+        if gs.action.is_some() {
+            return self.action(ui, gs, query, rect, response);
         }
 
         self.control(
@@ -308,45 +458,136 @@ impl SceneInput {
             #[cfg(target_arch = "wasm32")]
             &web_result,
         );
-
-        Query::none()
     }
 
-    /// Handle measurement action.
-    fn measure(
+    /// Handle action.
+    fn action(
         &mut self,
-        _ui: &mut egui::Ui,
+        ui: &mut egui::Ui,
         gs: &mut app::GaussianSplatting,
+        query: &mut Query,
         rect: &egui::Rect,
         response: &egui::Response,
-    ) -> Query {
-        if let Some(app::MeasurementAction::LocateHit {
-            hit_pair_index,
-            hit_index,
-            rx,
-            ..
-        }) = &gs.measurement.action
-        {
-            if let Ok(hit) = rx.try_recv() {
-                gs.measurement.hit_pairs[*hit_pair_index].hits[*hit_index].pos = hit;
-                gs.measurement.action = None;
+    ) {
+        // Receive query result
+        match &gs.action {
+            Some(app::Action::MeasurementLocateHit {
+                hit_pair_index,
+                hit_index,
+                rx,
+                ..
+            }) => {
+                if let Ok(hit) = rx.try_recv() {
+                    gs.measurement.hit_pairs[*hit_pair_index].hits[*hit_index].pos = hit;
+                    gs.action = None;
+                }
             }
+            None | Some(app::Action::Selection { .. }) => {}
         }
 
-        match &gs.measurement.action {
-            Some(app::MeasurementAction::LocateHit { tx, .. })
-                if response.clicked_by(egui::PointerButton::Primary) =>
-            {
+        // Do action
+        match &mut gs.action {
+            Some(app::Action::MeasurementLocateHit { tx, .. }) => {
+                if !response.clicked_by(egui::PointerButton::Primary) {
+                    *query = Query::none();
+                    return;
+                }
+
                 let interact_pos = response.interact_pointer_pos().expect("pointer pos");
 
                 if !rect.contains(interact_pos) {
-                    return Query::none();
+                    *query = Query::none();
+                    return;
                 }
 
                 let pos = (interact_pos - rect.min).to_pos2();
-                Query::locate_hit(pos, gs.measurement.hit_method, tx.clone())
+                *query = Query::measurement_locate_hit(pos, gs.measurement.hit_method, tx.clone());
             }
-            _ => Query::none(),
+            Some(app::Action::Selection {
+                method,
+                immediate,
+                brush_radius,
+            }) => {
+                // Brush radius
+                if *method == app::SelectionMethod::Brush {
+                    let scroll_delta = ui
+                        .ctx()
+                        .input(|input| (input.raw_scroll_delta.y as i32).signum());
+
+                    *brush_radius = (*brush_radius as i32 + scroll_delta).clamp(1, 200) as u32;
+                    gs.selection.brush_radius = *brush_radius;
+                }
+
+                // Pos
+                let Some(hover_pos) = response.hover_pos() else {
+                    *query = Query::none();
+                    return;
+                };
+
+                if !rect.contains(hover_pos) {
+                    *query = Query::none();
+                    return;
+                }
+
+                let pos = Vec2::from_array((hover_pos - rect.min).to_pos2().into());
+
+                // Operation
+                let (shift, ctrl) = ui
+                    .ctx()
+                    .input(|input| (input.modifiers.shift_only(), input.modifiers.command_only()));
+
+                let op = if shift {
+                    gs::QuerySelectionOp::Add
+                } else if ctrl {
+                    gs::QuerySelectionOp::Remove
+                } else {
+                    gs::QuerySelectionOp::Set
+                };
+
+                // End
+                if ui
+                    .ctx()
+                    .input(|input| input.pointer.button_released(egui::PointerButton::Primary))
+                {
+                    *query = Query::selection(
+                        Some(QuerySelectionAction::End),
+                        op,
+                        *immediate,
+                        *brush_radius,
+                        pos,
+                    );
+                    return;
+                }
+
+                // Update
+                if !ui
+                    .ctx()
+                    .input(|input| input.pointer.button_down(egui::PointerButton::Primary))
+                {
+                    *query = Query::selection(None, op, *immediate, *brush_radius, pos);
+                    return;
+                }
+
+                // Start
+                let action = match query {
+                    Query::None { .. } | Query::Selection { action: None, .. } => {
+                        Some(match method {
+                            app::SelectionMethod::Rect => {
+                                QuerySelectionAction::Start(gs::QueryToolsetTool::Rect)
+                            }
+                            app::SelectionMethod::Brush => {
+                                QuerySelectionAction::Start(gs::QueryToolsetTool::Brush)
+                            }
+                        })
+                    }
+                    _ => None,
+                };
+
+                *query = Query::selection(action, op, *immediate, *brush_radius, pos);
+            }
+            None => {
+                *query = Query::none();
+            }
         }
     }
 
@@ -604,6 +845,16 @@ impl Default for SceneInput {
     }
 }
 
+/// The action of [`Query::Selection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuerySelectionAction {
+    /// Start a selection.
+    Start(gs::QueryToolsetTool),
+
+    /// End the selection.
+    End,
+}
+
 /// The query callback resources.
 #[derive(Debug, Clone)]
 enum Query {
@@ -611,7 +862,7 @@ enum Query {
     None { pod: gs::QueryNonePod },
 
     /// The locate hit query.
-    LocateHit {
+    MeasurementLocateHit {
         /// The query POD.
         pod: gs::QueryHitPod,
 
@@ -620,6 +871,24 @@ enum Query {
 
         /// The query result sender.
         tx: mpsc::Sender<Vec3>,
+    },
+
+    /// The selection query.
+    Selection {
+        /// The action.
+        action: Option<QuerySelectionAction>,
+
+        /// The operation.
+        op: gs::QuerySelectionOp,
+
+        /// Whether it is immediate.
+        immediate: bool,
+
+        /// The brush size.
+        brush_radius: u32,
+
+        /// The mouse position.
+        pos: Vec2,
     },
 }
 
@@ -631,24 +900,33 @@ impl Query {
         }
     }
 
-    /// Create a locate hit query.
-    fn locate_hit(
+    /// Create a [`Query::MeasurementLocateHit`] query.
+    fn measurement_locate_hit(
         coords: egui::Pos2,
         hit_method: app::MeasurementHitMethod,
         tx: mpsc::Sender<Vec3>,
     ) -> Self {
-        Self::LocateHit {
+        Self::MeasurementLocateHit {
             pod: gs::QueryHitPod::new(Vec2::from_array(coords.into())),
             hit_method,
             tx,
         }
     }
 
-    /// Get the POD.
-    fn pod(&self) -> &gs::QueryPod {
-        match self {
-            Self::None { pod } => pod.as_query(),
-            Self::LocateHit { pod, .. } => pod.as_query(),
+    /// Create a [`Query::Selection`] query.
+    fn selection(
+        action: Option<QuerySelectionAction>,
+        op: gs::QuerySelectionOp,
+        immediate: bool,
+        brush_radius: u32,
+        pos: Vec2,
+    ) -> Self {
+        Self::Selection {
+            action,
+            op,
+            immediate,
+            brush_radius,
+            pos,
         }
     }
 }
@@ -801,8 +1079,8 @@ enum Viewer {
     ShSingleCov3dHalf(gs::Viewer<gs::GaussianPodWithShSingleCov3dHalfConfigs>),
     ShHalfCov3dSingle(gs::Viewer<gs::GaussianPodWithShHalfCov3dSingleConfigs>),
     ShHalfCov3dHalf(gs::Viewer<gs::GaussianPodWithShHalfCov3dHalfConfigs>),
-    ShMinMaxNormCov3dSingle(gs::Viewer<gs::GaussianPodWithShMinMaxNormCov3dSingleConfigs>),
-    ShMinMaxNormCov3dHalf(gs::Viewer<gs::GaussianPodWithShMinMaxNormCov3dHalfConfigs>),
+    ShNorm8Cov3dSingle(gs::Viewer<gs::GaussianPodWithShNorm8Cov3dSingleConfigs>),
+    ShNorm8Cov3dHalf(gs::Viewer<gs::GaussianPodWithShNorm8Cov3dHalfConfigs>),
     ShRemoveCov3dSingle(gs::Viewer<gs::GaussianPodWithShNoneCov3dSingleConfigs>),
     ShRemoveCov3dHalf(gs::Viewer<gs::GaussianPodWithShNoneCov3dHalfConfigs>),
 }
@@ -814,8 +1092,8 @@ macro_rules! viewer_call {
             Self::ShSingleCov3dHalf(viewer) => &viewer.$field,
             Self::ShHalfCov3dSingle(viewer) => &viewer.$field,
             Self::ShHalfCov3dHalf(viewer) => &viewer.$field,
-            Self::ShMinMaxNormCov3dSingle(viewer) => &viewer.$field,
-            Self::ShMinMaxNormCov3dHalf(viewer) => &viewer.$field,
+            Self::ShNorm8Cov3dSingle(viewer) => &viewer.$field,
+            Self::ShNorm8Cov3dHalf(viewer) => &viewer.$field,
             Self::ShRemoveCov3dSingle(viewer) => &viewer.$field,
             Self::ShRemoveCov3dHalf(viewer) => &viewer.$field,
         }
@@ -826,8 +1104,8 @@ macro_rules! viewer_call {
             Self::ShSingleCov3dHalf(viewer) => &mut viewer.$field,
             Self::ShHalfCov3dSingle(viewer) => &mut viewer.$field,
             Self::ShHalfCov3dHalf(viewer) => &mut viewer.$field,
-            Self::ShMinMaxNormCov3dSingle(viewer) => &mut viewer.$field,
-            Self::ShMinMaxNormCov3dHalf(viewer) => &mut viewer.$field,
+            Self::ShNorm8Cov3dSingle(viewer) => &mut viewer.$field,
+            Self::ShNorm8Cov3dHalf(viewer) => &mut viewer.$field,
             Self::ShRemoveCov3dSingle(viewer) => &mut viewer.$field,
             Self::ShRemoveCov3dHalf(viewer) => &mut viewer.$field,
         }
@@ -838,8 +1116,8 @@ macro_rules! viewer_call {
             Self::ShSingleCov3dHalf(viewer) => viewer.$field,
             Self::ShHalfCov3dSingle(viewer) => viewer.$field,
             Self::ShHalfCov3dHalf(viewer) => viewer.$field,
-            Self::ShMinMaxNormCov3dSingle(viewer) => viewer.$field,
-            Self::ShMinMaxNormCov3dHalf(viewer) => viewer.$field,
+            Self::ShNorm8Cov3dSingle(viewer) => viewer.$field,
+            Self::ShNorm8Cov3dHalf(viewer) => viewer.$field,
             Self::ShRemoveCov3dSingle(viewer) => viewer.$field,
             Self::ShRemoveCov3dHalf(viewer) => viewer.$field,
         }
@@ -850,8 +1128,8 @@ macro_rules! viewer_call {
             Self::ShSingleCov3dHalf(viewer) => viewer.$fn($($args),*),
             Self::ShHalfCov3dSingle(viewer) => viewer.$fn($($args),*),
             Self::ShHalfCov3dHalf(viewer) => viewer.$fn($($args),*),
-            Self::ShMinMaxNormCov3dSingle(viewer) => viewer.$fn($($args),*),
-            Self::ShMinMaxNormCov3dHalf(viewer) => viewer.$fn($($args),*),
+            Self::ShNorm8Cov3dSingle(viewer) => viewer.$fn($($args),*),
+            Self::ShNorm8Cov3dHalf(viewer) => viewer.$fn($($args),*),
             Self::ShRemoveCov3dSingle(viewer) => viewer.$fn($($args),*),
             Self::ShRemoveCov3dHalf(viewer) => viewer.$fn($($args),*),
         }
@@ -862,8 +1140,8 @@ macro_rules! viewer_call {
             Self::ShSingleCov3dHalf(viewer) => viewer.$fn($($args),*).await,
             Self::ShHalfCov3dSingle(viewer) => viewer.$fn($($args),*).await,
             Self::ShHalfCov3dHalf(viewer) => viewer.$fn($($args),*).await,
-            Self::ShMinMaxNormCov3dSingle(viewer) => viewer.$fn($($args),*).await,
-            Self::ShMinMaxNormCov3dHalf(viewer) => viewer.$fn($($args),*).await,
+            Self::ShNorm8Cov3dSingle(viewer) => viewer.$fn($($args),*).await,
+            Self::ShNorm8Cov3dHalf(viewer) => viewer.$fn($($args),*).await,
             Self::ShRemoveCov3dSingle(viewer) => viewer.$fn($($args),*).await,
             Self::ShRemoveCov3dHalf(viewer) => viewer.$fn($($args),*).await,
         }
@@ -890,6 +1168,7 @@ impl Viewer {
     pub fn new(
         device: &wgpu::Device,
         texture_format: wgpu::TextureFormat,
+        texture_size: UVec2,
         gaussians: &gs::Gaussians,
         compressions: &app::Compressions,
     ) -> Result<Self, gs::Error> {
@@ -903,9 +1182,13 @@ impl Viewer {
         }
 
         macro_rules! new {
-            ($sh:ident, $cov3d:ident) => {paste::paste! {
-                Self::[<Sh $sh Cov3d $cov3d>](gs::Viewer::new(device, texture_format, gaussians)?)
-            }};
+            ($sh:ident, $cov3d:ident) => {
+                paste::paste! {
+                    Self::[<Sh $sh Cov3d $cov3d>](gs::Viewer::new(
+                        device, texture_format, texture_size, gaussians
+                    )?)
+                }
+            };
         }
 
         Ok(match compressions {
@@ -913,8 +1196,8 @@ impl Viewer {
             case!(Single, Half) => new!(Single, Half),
             case!(Half, Single) => new!(Half, Single),
             case!(Half, Half) => new!(Half, Half),
-            case!(MinMaxNorm, Single) => new!(MinMaxNorm, Single),
-            case!(MinMaxNorm, Half) => new!(MinMaxNorm, Half),
+            case!(Norm8, Single) => new!(Norm8, Single),
+            case!(Norm8, Half) => new!(Norm8, Half),
             case!(Remove, Single) => new!(Remove, Single),
             case!(Remove, Half) => new!(Remove, Half),
         })
@@ -930,10 +1213,15 @@ impl Viewer {
     viewer_getters!(query_buffer);
     viewer_getters!(query_result_count_buffer);
     viewer_getters!(query_results_buffer);
+    viewer_getters!(postprocess_indirect_args_buffer);
+    viewer_getters!(selection_highlight_buffer);
+    viewer_getters!(selection_buffer);
+    viewer_getters!(query_texture);
 
     viewer_getters!(preprocessor);
     viewer_getters!(radix_sorter);
     viewer_getters!(renderer);
+    viewer_getters!(postprocessor);
 
     /// Update the camera.
     pub fn update_camera(
@@ -981,6 +1269,18 @@ impl Viewer {
         );
     }
 
+    /// Update the selection highlight.
+    pub fn update_selection_highlight(&mut self, queue: &wgpu::Queue, color: Vec4) {
+        viewer_call!(self, fn update_selection_highlight, queue, color);
+    }
+
+    /// Update the query texture size.
+    ///
+    /// This requires the `query-texture` feature.
+    pub fn update_query_texture_size(&mut self, device: &wgpu::Device, size: UVec2) {
+        viewer_call!(self, fn update_query_texture_size, device, size);
+    }
+
     /// Render the viewer.
     pub fn render(
         &self,
@@ -1017,6 +1317,15 @@ struct SceneResource {
     /// When the query is not none, all following query will be ignored until the result is
     /// received.
     query_resource: Option<SceneQueryResource>,
+
+    /// The query toolset.
+    query_toolset: gs::QueryToolset,
+
+    /// The query texture overlay.
+    query_texture_overlay: gs::QueryTextureOverlay,
+
+    /// The query cursor.
+    query_cursor: gs::QueryCursor,
 }
 
 impl SceneResource {
@@ -1033,6 +1342,7 @@ impl SceneResource {
             Viewer::new(
                 render_state.device.as_ref(),
                 render_state.target_format,
+                uvec2(1, 1),
                 gaussians,
                 compressions,
             )
@@ -1049,12 +1359,40 @@ impl SceneResource {
         log::debug!("Creating query resource");
         let query_resource = None;
 
+        log::debug!("Creating query toolset");
+        let query_toolset = {
+            let viewer = viewer.lock().expect("viewer");
+
+            gs::QueryToolset::new(
+                render_state.device.as_ref(),
+                viewer.query_texture(),
+                viewer.camera_buffer(),
+            )
+        };
+
+        log::debug!("Creating query texture overlay");
+        let query_texture_overlay = gs::QueryTextureOverlay::new(
+            render_state.device.as_ref(),
+            render_state.target_format,
+            viewer.lock().expect("viewer").query_texture(),
+        );
+
+        log::debug!("Creating query cursor");
+        let query_cursor = gs::QueryCursor::new(
+            render_state.device.as_ref(),
+            render_state.target_format,
+            viewer.lock().expect("viewer").camera_buffer(),
+        );
+
         log::info!("Scene loaded");
 
         Ok(Self {
             viewer,
             measurement_renderer,
             query_resource,
+            query_toolset,
+            query_texture_overlay,
+            query_cursor,
         })
     }
 }
@@ -1079,13 +1417,13 @@ struct SceneQueryResource {
 enum SceneQueryStage {
     /// The viewer is querying.
     Querying,
-    /// The locate hit query is downloading count.
-    LocateHitDownloadingCount {
+    /// The query is downloading count.
+    DownloadingCount {
         /// The receiver.
         rx: oneshot::Receiver<u32>,
     },
     /// The locate hit query is downloading the results.
-    LocateHitDownloadingResults {
+    MeasurementLocateHitDownloadingResults {
         /// The receiver.
         rx: oneshot::Receiver<Vec<gs::QueryHitResultPod>>,
     },
@@ -1128,238 +1466,55 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             viewer,
             measurement_renderer,
             query_resource,
+            query_toolset,
+            query_texture_overlay,
+            query_cursor,
         } = callback_resources.get_mut().expect("scene resource");
 
-        // The query results.
-        #[cfg(target_arch = "wasm32")]
-        match query_resource {
-            Some(SceneQueryResource { query, stage }) => {
-                match stage {
-                    SceneQueryStage::Querying => {
-                        log::debug!("Querying");
-
-                        let mut encoder =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Query Result Count Download Encoder"),
-                            });
-                        viewer
-                            .lock()
-                            .expect("viewer")
-                            .query_result_count_buffer()
-                            .prepare_download(&mut encoder);
-                        queue.submit(Some(encoder.finish()));
-
-                        let (tx, rx) = oneshot::channel();
-
-                        viewer
-                            .lock()
-                            .expect("viewer")
-                            .query_result_count_buffer()
-                            .download_buffer()
-                            .slice(..)
-                            .map_async(wgpu::MapMode::Read, {
-                                let viewer = viewer.clone();
-                                move |_| {
-                                    let count = bytemuck::pod_read_unaligned(
-                                        &viewer
-                                            .lock()
-                                            .expect("viewer")
-                                            .query_result_count_buffer()
-                                            .download_buffer()
-                                            .slice(..)
-                                            .get_mapped_range(),
-                                    );
-                                    viewer
-                                        .lock()
-                                        .expect("viewer")
-                                        .query_result_count_buffer()
-                                        .download_buffer()
-                                        .unmap();
-
-                                    if let Err(e) = tx.send(count) {
-                                        log::error!(
-                                            "Error occurred while sending query result count: {e:?}"
-                                        );
-                                    }
-                                }
-                            });
-                        device.poll(wgpu::Maintain::Wait);
-
-                        *stage = SceneQueryStage::LocateHitDownloadingCount { rx };
-                    }
-                    SceneQueryStage::LocateHitDownloadingCount { rx } => match rx.try_recv() {
-                        Ok(0) => {
-                            log::debug!("Locate hit query returned 0 hits");
-                            *query_resource = None;
-                        }
-                        Ok(count) => {
-                            log::debug!("Locate hit query returned {count} hits");
-                            // In WASM, the viewer is not Send nor Sync, but in native, it is.
-                            #[allow(clippy::arc_with_non_send_sync)]
-                            let download = Arc::new(
-                                viewer
-                                    .lock()
-                                    .expect("viewer")
-                                    .query_results_buffer()
-                                    .create_download_buffer(device, count),
-                            );
-
-                            let mut encoder =
-                                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                    label: Some("Query Results Download Encoder"),
-                                });
-                            viewer
-                                .lock()
-                                .expect("viewer")
-                                .query_results_buffer()
-                                .prepare_download(&mut encoder, &download);
-                            queue.submit(Some(encoder.finish()));
-
-                            let (tx, rx) = oneshot::channel();
-                            download.slice(..).map_async(wgpu::MapMode::Read, {
-                                let download = download.clone();
-                                move |_| {
-                                    let results = bytemuck::allocation::pod_collect_to_vec(
-                                        &download.slice(..).get_mapped_range(),
-                                    );
-
-                                    if let Err(e) = tx.send(results) {
-                                        log::error!(
-                                            "Error occurred while sending query results: {e:?}"
-                                        );
-                                    }
-                                }
-                            });
-                            device.poll(wgpu::Maintain::Wait);
-
-                            *stage = SceneQueryStage::LocateHitDownloadingResults { rx };
-                        }
-                        _ => {}
-                    },
-                    SceneQueryStage::LocateHitDownloadingResults { rx, .. } => {
-                        if let Ok(mut results) = rx.try_recv() {
-                            if let Query::LocateHit {
-                                pod,
-                                hit_method,
-                                tx,
-                                ..
-                            } = query
-                            {
-                                let pos = match hit_method {
-                                    app::MeasurementHitMethod::MostAlpha => {
-                                        gs::query::hit_pos_by_most_alpha(
-                                            pod,
-                                            &mut results,
-                                            &self.camera,
-                                            self.viewer_size.as_uvec2(),
-                                        )
-                                        .map(|(_, _, pos)| pos)
-                                    }
-                                    app::MeasurementHitMethod::Closest => {
-                                        gs::query::hit_pos_by_closest(
-                                            pod,
-                                            &results,
-                                            &self.camera,
-                                            self.viewer_size.as_uvec2(),
-                                        )
-                                        .map(|(_, pos)| pos)
-                                    }
-                                }
-                                .unwrap_or(Vec3::ZERO);
-
-                                if let Err(e) = tx.send(pos) {
-                                    log::error!("Error occurred while sending hit pos: {e:?}");
-                                }
-                            }
-
-                            *query_resource = None;
-                        }
-                    }
-                };
-
-                viewer
-                    .lock()
-                    .expect("viewer")
-                    .update_query(queue, &gs::QueryPod::none());
-            }
-            query_resource => {
-                if self.query.pod().query_type() != gs::QueryType::None {
-                    *query_resource = Some(SceneQueryResource {
-                        query: self.query.clone(),
-                        stage: SceneQueryStage::Querying,
-                    });
-                }
-
-                viewer
-                    .lock()
-                    .expect("viewer")
-                    .update_query(queue, self.query.pod());
-            }
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
+        // Postprocess, because eframe cannot do any compute pass after the render pass.
         {
-            if let Some(SceneQueryResource {
-                query:
-                    Query::LocateHit {
-                        pod,
-                        hit_method,
-                        tx,
-                    },
-            }) = query_resource
-            {
-                log::debug!("Querying");
+            let viewer = viewer.lock().expect("viewer");
 
-                #[allow(clippy::await_holding_lock)]
-                let mut results = futures::executor::block_on(async {
-                    viewer
-                        .lock()
-                        .expect("viewer")
-                        .download_query_results(device, queue)
-                        .await
-                        .expect("query results")
-                        .into_iter()
-                        .map(gs::QueryHitResultPod::from)
-                        .collect::<Vec<_>>()
-                });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Postprocess Encoder"),
+            });
+            viewer.postprocessor().postprocess(
+                &mut encoder,
+                self.gaussian_count as u32,
+                viewer.postprocess_indirect_args_buffer(),
+            );
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
+        }
 
-                let pos = match hit_method {
-                    app::MeasurementHitMethod::MostAlpha => gs::query::hit_pos_by_most_alpha(
-                        pod,
-                        &mut results,
-                        &self.camera,
-                        self.viewer_size.as_uvec2(),
-                    )
-                    .map(|(_, _, pos)| pos)
-                    .unwrap_or(Vec3::ZERO),
-                    app::MeasurementHitMethod::Closest => gs::query::hit_pos_by_closest(
-                        pod,
-                        &results,
-                        &self.camera,
-                        self.viewer_size.as_uvec2(),
-                    )
-                    .map(|(_, pos)| pos)
-                    .unwrap_or(Vec3::ZERO),
-                };
+        // Update query texture size.
+        let wgpu::Extent3d { width, height, .. } = viewer
+            .lock()
+            .expect("viewer")
+            .query_texture()
+            .texture()
+            .size();
+        let texture_size = uvec2(width, height);
 
-                if let Err(e) = tx.send(pos) {
-                    log::error!("Error occurred while sending hit pos: {}", e.0);
-                }
-            }
-
-            *query_resource = None;
-
-            if self.query.pod().query_type() != gs::QueryType::None {
-                *query_resource = Some(SceneQueryResource {
-                    query: self.query.clone(),
-                });
-            }
-
+        if texture_size != self.viewer_size.as_uvec2() {
             viewer
                 .lock()
                 .expect("viewer")
-                .update_query(queue, self.query.pod());
+                .update_query_texture_size(device, self.viewer_size.as_uvec2());
+            query_texture_overlay
+                .update_bind_group(device, viewer.lock().expect("viewer").query_texture());
         }
+
+        // Handle query.
+        self.query(
+            device,
+            queue,
+            egui_encoder,
+            viewer,
+            query_resource,
+            query_toolset,
+            query_cursor,
+        );
 
         // Update the viewer.
         viewer.lock().expect("viewer").update_camera(
@@ -1414,6 +1569,9 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         let SceneResource {
             viewer,
             measurement_renderer,
+            query_toolset,
+            query_texture_overlay,
+            query_cursor,
             ..
         } = callback_resources.get().expect("scene resource");
 
@@ -1428,6 +1586,417 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         if !self.measurement_visible_hit_pairs.is_empty() {
             measurement_renderer
                 .render(render_pass, self.measurement_visible_hit_pairs.len() as u32);
+        }
+
+        if let Query::Selection { .. } = self.query {
+            if let Some((gs::QueryToolsetUsedTool::QueryTextureTool { .. }, ..)) =
+                query_toolset.state()
+            {
+                query_texture_overlay.render_with_pass(render_pass);
+            } else {
+                query_cursor.render_with_pass(render_pass);
+            }
+        }
+    }
+}
+
+impl SceneCallback {
+    /// Handle new query.
+    ///
+    /// This is called when `query_resource` is `None`.
+    fn handle_new_query(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        viewer: &mut Arc<Mutex<Viewer>>,
+        query_resource: &mut Option<SceneQueryResource>,
+        query_toolset: &mut gs::QueryToolset,
+        query_cursor: &mut gs::QueryCursor,
+    ) {
+        if let Query::MeasurementLocateHit { .. } = self.query {
+            *query_resource = Some(SceneQueryResource {
+                query: self.query.clone(),
+
+                #[cfg(target_arch = "wasm32")]
+                stage: SceneQueryStage::Querying,
+            });
+        }
+
+        let query_pod = match &self.query {
+            Query::None { pod } => pod.as_query(),
+            Query::MeasurementLocateHit { pod, .. } => pod.as_query(),
+            Query::Selection {
+                action,
+                op,
+                immediate,
+                brush_radius,
+                pos,
+            } => {
+                query_toolset.set_use_texture(!immediate);
+                query_toolset.update_brush_radius(*brush_radius);
+
+                match action {
+                    Some(QuerySelectionAction::Start(tool)) => {
+                        query_toolset.start(*tool, *op, *pos)
+                    }
+                    Some(QuerySelectionAction::End) => query_toolset.end(),
+                    None => query_toolset.update_pos(*pos),
+                };
+
+                query_cursor.update_query_toolset(queue, query_toolset, *pos);
+
+                query_toolset.query()
+            }
+        };
+
+        viewer
+            .lock()
+            .expect("viewer")
+            .update_query(queue, query_pod);
+
+        if let Query::Selection {
+            immediate: false, ..
+        } = self.query
+        {
+            query_toolset.render(
+                queue,
+                encoder,
+                viewer.lock().expect("viewer").query_texture(),
+            );
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SceneCallback {
+    /// Handle query.
+    #[allow(clippy::too_many_arguments)]
+    fn query(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        viewer: &mut Arc<Mutex<Viewer>>,
+        query_resource: &mut Option<SceneQueryResource>,
+        query_toolset: &mut gs::QueryToolset,
+        query_cursor: &mut gs::QueryCursor,
+    ) {
+        if let Some(SceneQueryResource { query }) = query_resource {
+            match query {
+                Query::MeasurementLocateHit {
+                    pod,
+                    hit_method,
+                    tx,
+                } => {
+                    #[allow(clippy::await_holding_lock)]
+                    let mut results = futures::executor::block_on(async {
+                        viewer
+                            .lock()
+                            .expect("viewer")
+                            .download_query_results(device, queue)
+                            .await
+                            .expect("query results")
+                            .into_iter()
+                            .map(gs::QueryHitResultPod::from)
+                            .collect::<Vec<_>>()
+                    });
+
+                    let pos = match hit_method {
+                        app::MeasurementHitMethod::MostAlpha => gs::query::hit_pos_by_most_alpha(
+                            pod,
+                            &mut results,
+                            &self.camera,
+                            self.viewer_size.as_uvec2(),
+                        )
+                        .map(|(_, _, pos)| pos)
+                        .unwrap_or(Vec3::ZERO),
+                        app::MeasurementHitMethod::Closest => gs::query::hit_pos_by_closest(
+                            pod,
+                            &results,
+                            &self.camera,
+                            self.viewer_size.as_uvec2(),
+                        )
+                        .map(|(_, pos)| pos)
+                        .unwrap_or(Vec3::ZERO),
+                    };
+
+                    if let Err(e) = tx.send(pos) {
+                        log::error!("Error occurred while sending hit pos: {}", e.0);
+                    }
+                }
+                Query::None { .. } | Query::Selection { .. } => {}
+            }
+        }
+
+        *query_resource = None;
+
+        self.handle_new_query(
+            queue,
+            encoder,
+            viewer,
+            query_resource,
+            query_toolset,
+            query_cursor,
+        );
+    }
+}
+
+/// The result from query.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
+enum SceneCallbackQueryResult {
+    /// Next stage.
+    Stage(SceneQueryStage),
+
+    /// Next query resource.
+    QueryResource(Option<SceneQueryResource>),
+
+    /// Do nothing.
+    None,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl SceneCallback {
+    /// Handle query.
+    #[allow(clippy::too_many_arguments)]
+    fn query(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        viewer: &mut Arc<Mutex<Viewer>>,
+        query_resource: &mut Option<SceneQueryResource>,
+        query_toolset: &mut gs::QueryToolset,
+        query_cursor: &mut gs::QueryCursor,
+    ) {
+        // Macro rules to handle result of the query.
+        macro_rules! handle_query_result {
+            ($stage:expr, $query_resource:expr, $query:expr) => {
+                match $query {
+                    SceneCallbackQueryResult::Stage(next_stage) => {
+                        *$stage = next_stage;
+                    }
+                    SceneCallbackQueryResult::QueryResource(resource) => {
+                        *$query_resource = resource;
+                    }
+                    SceneCallbackQueryResult::None => {}
+                }
+            };
+        }
+
+        // The query results.
+        if let Some(SceneQueryResource { query, stage }) = query_resource {
+            match stage {
+                SceneQueryStage::Querying => handle_query_result!(
+                    stage,
+                    query_resource,
+                    self.querying(device, queue, viewer, query)
+                ),
+                SceneQueryStage::DownloadingCount { rx } => handle_query_result!(
+                    stage,
+                    query_resource,
+                    self.downloading_count(device, queue, rx, viewer, query)
+                ),
+                SceneQueryStage::MeasurementLocateHitDownloadingResults { rx, .. } => {
+                    handle_query_result!(
+                        stage,
+                        query_resource,
+                        self.measurement_locate_hit_downloading_results(
+                            device, queue, rx, viewer, query
+                        )
+                    )
+                }
+            };
+
+            viewer
+                .lock()
+                .expect("viewer")
+                .update_query(queue, &gs::QueryPod::none());
+        };
+
+        if query_resource.is_none() {
+            self.handle_new_query(
+                queue,
+                encoder,
+                viewer,
+                query_resource,
+                query_toolset,
+                query_cursor,
+            );
+        }
+    }
+
+    /// Handle querying.
+    fn querying(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        viewer: &mut Arc<Mutex<Viewer>>,
+        query: &mut Query,
+    ) -> SceneCallbackQueryResult {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Query Result Count Download Encoder"),
+        });
+        viewer
+            .lock()
+            .expect("viewer")
+            .query_result_count_buffer()
+            .prepare_download(&mut encoder);
+        queue.submit(Some(encoder.finish()));
+
+        let (tx, rx) = oneshot::channel();
+
+        viewer
+            .lock()
+            .expect("viewer")
+            .query_result_count_buffer()
+            .download_buffer()
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, {
+                let viewer = viewer.clone();
+                move |_| {
+                    let count = bytemuck::pod_read_unaligned(
+                        &viewer
+                            .lock()
+                            .expect("viewer")
+                            .query_result_count_buffer()
+                            .download_buffer()
+                            .slice(..)
+                            .get_mapped_range(),
+                    );
+                    viewer
+                        .lock()
+                        .expect("viewer")
+                        .query_result_count_buffer()
+                        .download_buffer()
+                        .unmap();
+
+                    if let Err(e) = tx.send(count) {
+                        log::error!("Error occurred while sending query result count: {e:?}");
+                    }
+                }
+            });
+        device.poll(wgpu::Maintain::Wait);
+
+        match query {
+            Query::MeasurementLocateHit { .. } => {
+                SceneCallbackQueryResult::Stage(SceneQueryStage::DownloadingCount { rx })
+            }
+            Query::None { .. } | Query::Selection { .. } => {
+                log::error!("Invalid query");
+                SceneCallbackQueryResult::QueryResource(None)
+            }
+        }
+    }
+
+    /// Handling the query result count.
+    fn downloading_count(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rx: &mut oneshot::Receiver<u32>,
+        viewer: &mut Arc<Mutex<Viewer>>,
+        query: &mut Query,
+    ) -> SceneCallbackQueryResult {
+        match rx.try_recv() {
+            Ok(0) => SceneCallbackQueryResult::QueryResource(None),
+            Ok(count) => {
+                match query {
+                    Query::MeasurementLocateHit { .. } => {
+                        // In WASM, the viewer is not Send nor Sync, but in native, it is.
+                        #[allow(clippy::arc_with_non_send_sync)]
+                        let download = Arc::new(
+                            viewer
+                                .lock()
+                                .expect("viewer")
+                                .query_results_buffer()
+                                .create_download_buffer(device, count),
+                        );
+
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Query Results Download Encoder"),
+                            });
+                        viewer
+                            .lock()
+                            .expect("viewer")
+                            .query_results_buffer()
+                            .prepare_download(&mut encoder, &download);
+                        queue.submit(Some(encoder.finish()));
+
+                        let (tx, rx) = oneshot::channel();
+                        download.slice(..).map_async(wgpu::MapMode::Read, {
+                            let download = download.clone();
+                            move |_| {
+                                let results = bytemuck::allocation::pod_collect_to_vec(
+                                    &download.slice(..).get_mapped_range(),
+                                );
+
+                                if let Err(e) = tx.send(results) {
+                                    log::error!(
+                                        "Error occurred while sending query results: {e:?}"
+                                    );
+                                }
+                            }
+                        });
+                        device.poll(wgpu::Maintain::Wait);
+
+                        SceneCallbackQueryResult::Stage(
+                            SceneQueryStage::MeasurementLocateHitDownloadingResults { rx },
+                        )
+                    }
+                    Query::None { .. } | Query::Selection { .. } => {
+                        log::error!("Invalid query");
+                        SceneCallbackQueryResult::QueryResource(None)
+                    }
+                }
+            }
+            _ => SceneCallbackQueryResult::None,
+        }
+    }
+
+    fn measurement_locate_hit_downloading_results(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        rx: &mut oneshot::Receiver<Vec<gs::QueryHitResultPod>>,
+        _viewer: &mut Arc<Mutex<Viewer>>,
+        query: &mut Query,
+    ) -> SceneCallbackQueryResult {
+        if let Ok(mut results) = rx.try_recv() {
+            if let Query::MeasurementLocateHit {
+                pod,
+                hit_method,
+                tx,
+                ..
+            } = query
+            {
+                let pos = match hit_method {
+                    app::MeasurementHitMethod::MostAlpha => gs::query::hit_pos_by_most_alpha(
+                        pod,
+                        &mut results,
+                        &self.camera,
+                        self.viewer_size.as_uvec2(),
+                    )
+                    .map(|(_, _, pos)| pos),
+                    app::MeasurementHitMethod::Closest => gs::query::hit_pos_by_closest(
+                        pod,
+                        &results,
+                        &self.camera,
+                        self.viewer_size.as_uvec2(),
+                    )
+                    .map(|(_, pos)| pos),
+                }
+                .unwrap_or(Vec3::ZERO);
+
+                if let Err(e) = tx.send(pos) {
+                    log::error!("Error occurred while sending hit pos: {e:?}");
+                }
+            }
+
+            SceneCallbackQueryResult::QueryResource(None)
+        } else {
+            SceneCallbackQueryResult::None
         }
     }
 }
