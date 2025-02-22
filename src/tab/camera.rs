@@ -35,7 +35,7 @@ impl Tab for Camera {
         ui.spacing_mut().item_spacing = egui::vec2(ui.spacing().item_spacing.x, 12.0);
 
         ui.scope_builder(ui_builder, |ui| {
-            egui::Grid::new("camera_grid").show(ui, |ui| {
+            egui::Grid::new("camera_control_mode_grid").show(ui, |ui| {
                 ui.label("Control Mode");
                 ui.horizontal(|ui| {
                     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,9 +45,10 @@ impl Tab for Camera {
                     }
 
                     macro_rules! value {
-                        ($ui: expr, $value: expr, $label: ident, $display: expr) => {
+                        ($ui:expr, $value:expr, $label:ident, $display:expr, $tooltip:expr) => {
                             if $ui
                                 .selectable_label($value == Mode::$label, $display)
+                                .on_hover_text($tooltip)
                                 .clicked()
                             {
                                 $value = Mode::$label;
@@ -61,8 +62,33 @@ impl Tab for Camera {
                     };
                     let mut new_mode = mode;
 
-                    value!(ui, new_mode, Orbit, "Orbit");
-                    value!(ui, new_mode, FirstPerson, "First Person");
+                    value!(
+                        ui,
+                        new_mode,
+                        Orbit,
+                        "Orbit",
+                        "• Hold left mouse button to rotate around the target\n\
+                         • Hold right mouse button to pan\n\
+                         • Hold middle mouse button to look around\n\
+                         • Scroll to zoom in/out"
+                    );
+                    value!(
+                        ui,
+                        new_mode,
+                        FirstPerson,
+                        "First Person",
+                        format!(
+                            "• Click on the viewer to focus, press Esc to unfocus\n\
+                             • WASD to move, Space to go up, Shift to go down\n\
+                             • Mouse to look around{}",
+                            if cfg!(target_arch = "wasm32") {
+                                "\n• In some browsers, focusing immediately after unfocusing may \
+                                not work"
+                            } else {
+                                ""
+                            }
+                        )
+                    );
 
                     if new_mode != mode {
                         camera.control = match new_mode {
@@ -79,46 +105,35 @@ impl Tab for Camera {
                             ),
                         };
                     }
-
-                    ui.menu_button("🔍 Help", |ui| {
-                        ui.vertical(|ui| {
-                            ui.strong("Orbit Mode");
-                            ui.label("• Hold left mouse button to rotate around the target");
-                            ui.label("• Hold right mouse button to pan");
-                            ui.label("• Hold middle mouse button to look around");
-                            ui.label("• Scroll to zoom in/out");
-                            ui.separator();
-                            ui.strong("First Person Mode");
-                            ui.label("• Click on the viewer to focus, press Esc to unfocus");
-                            ui.label("• WASD to move, Space to go up, Shift to go down");
-                            ui.label("• Mouse to look around");
-                            if cfg!(target_arch = "wasm32") {
-                                ui.label(
-                                    "• In some browsers, focusing immediately after unfocusing may \
-                                    not work"
-                                );
-                            }
-                        });
-                    });
                 });
                 ui.end_row();
+            });
 
+            ui.separator();
+
+            egui::Grid::new("camera_configs_grid").show(ui, |ui| {
                 if let app::CameraControl::Orbit(orbit) = &mut camera.control {
-                    ui.label("Orbit Target");
+                    ui.label("Orbit Target")
+                        .on_hover_text("The point which the camera orbits around");
                     ui.horizontal(|ui| {
                         macro_rules! value {
-                            ($ui: expr, $value: expr) => {
-                                $ui.add(
-                                    egui::DragValue::new(&mut $value)
-                                        .speed(0.01)
-                                        .fixed_decimals(4),
-                                );
+                            ($ui:expr, $axis:expr, $value:expr) => {
+                                $ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x /= 2.0;
+
+                                    ui.label($axis);
+                                    ui.add(
+                                        egui::DragValue::new(&mut $value)
+                                            .speed(0.01)
+                                            .fixed_decimals(4),
+                                    );
+                                });
                             };
                         }
 
-                        value!(ui, orbit.target.x);
-                        value!(ui, orbit.target.y);
-                        value!(ui, orbit.target.z);
+                        value!(ui, "X", orbit.target.x);
+                        value!(ui, "Y", orbit.target.y);
+                        value!(ui, "Z", orbit.target.z);
                     });
                     ui.end_row();
                 }
@@ -126,18 +141,23 @@ impl Tab for Camera {
                 ui.label("Position");
                 ui.horizontal(|ui| {
                     macro_rules! value {
-                        ($ui: expr, $value: expr) => {
-                            $ui.add(
-                                egui::DragValue::new(&mut $value)
-                                    .speed(0.01)
-                                    .fixed_decimals(4),
-                            );
+                        ($ui:expr, $axis:expr, $value:expr) => {
+                            $ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x /= 2.0;
+
+                                ui.label($axis);
+                                ui.add(
+                                    egui::DragValue::new(&mut $value)
+                                        .speed(0.01)
+                                        .fixed_decimals(4),
+                                );
+                            });
                         };
                     }
 
-                    value!(ui, camera.control.pos_mut().x);
-                    value!(ui, camera.control.pos_mut().y);
-                    value!(ui, camera.control.pos_mut().z);
+                    value!(ui, "X", camera.control.pos_mut().x);
+                    value!(ui, "Y", camera.control.pos_mut().y);
+                    value!(ui, "Z", camera.control.pos_mut().z);
                 });
                 ui.end_row();
 

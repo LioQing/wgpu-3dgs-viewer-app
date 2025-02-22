@@ -36,15 +36,17 @@ impl Tab for Measurement {
 
         ui.scope_builder(ui_builder, |ui| {
             egui::Grid::new("measurement_grid").show(ui, |ui| {
-                ui.label("Hit Method");
+                ui.label("Hit Method")
+                    .on_hover_text("Method to locate the hit position from the click");
                 ui.horizontal(|ui| {
                     macro_rules! value {
-                        ($ui: expr, $value: expr, $label: ident, $display: expr) => {
+                        ($ui:expr, $value:expr, $label:ident, $display:expr, $tooltip:expr) => {
                             if $ui
                                 .selectable_label(
                                     $value == app::MeasurementHitMethod::$label,
                                     $display,
                                 )
+                                .on_hover_text($tooltip)
                                 .clicked()
                             {
                                 $value = app::MeasurementHitMethod::$label;
@@ -52,8 +54,20 @@ impl Tab for Measurement {
                         };
                     }
 
-                    value!(ui, measurement.hit_method, MostAlpha, "Most Alpha");
-                    value!(ui, measurement.hit_method, Closest, "Closest");
+                    value!(
+                        ui,
+                        measurement.hit_method,
+                        MostAlpha,
+                        "Most Alpha",
+                        "The Gaussian with the most alpha value"
+                    );
+                    value!(
+                        ui,
+                        measurement.hit_method,
+                        Closest,
+                        "Closest",
+                        "The closest Gaussian"
+                    );
                 });
             });
 
@@ -100,16 +114,6 @@ impl Measurement {
                     .show(ui, |ui| {
                         let mut alive = true;
 
-                        macro_rules! value {
-                            ($ui: expr, $value: expr) => {
-                                $ui.add(
-                                    egui::DragValue::new(&mut $value)
-                                        .speed(0.01)
-                                        .fixed_decimals(4),
-                                );
-                            };
-                        }
-
                         ui.label("Label");
                         ui.add_sized(
                             egui::vec2(150.0, ui.spacing().interact_size.y),
@@ -142,12 +146,27 @@ impl Measurement {
                         );
                         ui.end_row();
 
+                        macro_rules! value {
+                            ($ui:expr, $axis:expr, $value:expr) => {
+                                $ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x /= 2.0;
+
+                                    ui.label($axis);
+                                    ui.add(
+                                        egui::DragValue::new(&mut $value)
+                                            .speed(0.001)
+                                            .fixed_decimals(4),
+                                    );
+                                });
+                            };
+                        }
+
                         for i in 0..2 {
                             ui.label(format!("Position {}", i + 1));
                             ui.horizontal(|ui| {
-                                value!(ui, hit_pair.hits[i].pos.x);
-                                value!(ui, hit_pair.hits[i].pos.y);
-                                value!(ui, hit_pair.hits[i].pos.z);
+                                value!(ui, "X", hit_pair.hits[i].pos.x);
+                                value!(ui, "Y", hit_pair.hits[i].pos.y);
+                                value!(ui, "Z", hit_pair.hits[i].pos.z);
 
                                 match action {
                                     Some(app::Action::MeasurementLocateHit {
@@ -160,7 +179,14 @@ impl Measurement {
                                         }
                                     }
                                     _ => {
-                                        if ui.button("Locate").clicked() {
+                                        if ui
+                                            .button("Locate")
+                                            .on_hover_text(
+                                                "Click on this then click on a point in the scene \
+                                                to locate the hit",
+                                            )
+                                            .clicked()
+                                        {
                                             let (tx, rx) = mpsc::channel();
                                             *action = Some(app::Action::MeasurementLocateHit {
                                                 hit_pair_index: index,

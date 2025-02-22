@@ -443,16 +443,7 @@ pub enum Action {
     },
 
     /// Selecting.
-    Selection {
-        /// The method.
-        method: SelectionMethod,
-
-        /// Whether the selection is immediate.
-        immediate: bool,
-
-        /// The brush radius.
-        brush_radius: u32,
-    },
+    Selection,
 }
 
 /// The Gaussian splatting model transform.
@@ -778,23 +769,27 @@ impl Default for MeasurementHit {
 /// The selection.
 #[derive(Debug)]
 pub struct Selection {
-    /// The brush radius.
-    pub brush_radius: u32,
+    /// The selection method.
+    pub method: SelectionMethod,
+
+    /// The selection operation.
+    pub operation: gs::QuerySelectionOp,
 
     /// Whether the selection is immediate.
     pub immediate: bool,
 
-    /// The selection method.
-    pub method: SelectionMethod,
+    /// The brush radius.
+    pub brush_radius: u32,
 }
 
 impl Selection {
     /// Create a new selection.
     pub fn new() -> Self {
         Self {
-            brush_radius: 40,
-            immediate: false,
             method: SelectionMethod::Rect,
+            operation: gs::QuerySelectionOp::Set,
+            immediate: false,
+            brush_radius: 40,
         }
     }
 }

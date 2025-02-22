@@ -1,3 +1,5 @@
+use wgpu_3dgs_viewer as gs;
+
 use crate::app;
 
 use super::Tab;
@@ -43,10 +45,6 @@ impl Tab for Selection {
                                 .clicked()
                             {
                                 $value = app::SelectionMethod::$label;
-
-                                if let Some(app::Action::Selection { method, .. }) = action {
-                                    *method = $value;
-                                }
                             }
                         };
                     }
@@ -56,22 +54,34 @@ impl Tab for Selection {
                 });
                 ui.end_row();
 
-                ui.label("Immediate Mode");
-                if ui.checkbox(&mut selection.immediate, "").clicked() {
-                    if let Some(app::Action::Selection { immediate, .. }) = action {
-                        *immediate = selection.immediate;
+                ui.label("Operation");
+                ui.horizontal(|ui| {
+                    macro_rules! value {
+                        ($ui: expr, $action: expr, $value: expr, $label: ident, $display: expr) => {
+                            if $ui
+                                .selectable_label($value == gs::QuerySelectionOp::$label, $display)
+                                .clicked()
+                            {
+                                $value = gs::QuerySelectionOp::$label;
+                            }
+                        };
                     }
-                }
+
+                    value!(ui, action, selection.operation, Set, "Set");
+                    value!(ui, action, selection.operation, Add, "Add");
+                    value!(ui, action, selection.operation, Remove, "Remove");
+                });
+                ui.end_row();
+
+                ui.label("Immediate Mode")
+                    .on_hover_text("The selection is immediately applied while dragging");
+                ui.checkbox(&mut selection.immediate, "");
                 ui.end_row();
 
                 if selection.method == app::SelectionMethod::Brush {
                     ui.label("Brush Radius");
                     ui.add(egui::Slider::new(&mut selection.brush_radius, 1..=100).integer());
                     ui.end_row();
-
-                    if let Some(app::Action::Selection { brush_radius, .. }) = action {
-                        *brush_radius = selection.brush_radius;
-                    }
                 }
             });
 
@@ -83,11 +93,7 @@ impl Tab for Selection {
                 }
                 _ => {
                     if ui.button("Select").clicked() {
-                        *action = Some(app::Action::Selection {
-                            method: selection.method,
-                            immediate: selection.immediate,
-                            brush_radius: selection.brush_radius,
-                        });
+                        *action = Some(app::Action::Selection);
                     }
                 }
             }

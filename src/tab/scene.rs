@@ -197,19 +197,15 @@ impl Scene {
         let mut loaded = true;
 
         ui.horizontal(|ui| {
-            ui.label(format!("📦 Loaded: {}", gs.file_name));
-
-            ui.separator();
-
             ui.label(format!(
-                "Original Size: {}",
-                util::human_readable_size(self.original_size)
-            ));
-
-            ui.label(format!(
-                "Compressed Size: {}",
-                util::human_readable_size(self.compressed_size)
-            ));
+                "📦 Loaded: {}",
+                if gs.file_name.len() > 20 {
+                    format!("{}...", &gs.file_name[..20])
+                } else {
+                    gs.file_name.clone()
+                }
+            ))
+            .on_hover_text(&gs.file_name);
 
             ui.separator();
 
@@ -417,6 +413,11 @@ struct SceneInput {
     /// Whether the scene is focused.
     focused: bool,
 
+    /// The previous modifier state.
+    ///
+    /// Currently this is for selection operation only.
+    prev_modifiers: egui::Modifiers,
+
     /// The web event listener.
     ///
     /// This is only available on the web.
@@ -429,6 +430,8 @@ impl SceneInput {
     fn new() -> Self {
         Self {
             focused: false,
+
+            prev_modifiers: egui::Modifiers::default(),
 
             #[cfg(target_arch = "wasm32")]
             web_event_listener: SceneInputWebEventListener::new(),
@@ -448,16 +451,18 @@ impl SceneInput {
         let web_result = self.web_event_listener.update();
 
         if gs.action.is_some() {
-            return self.action(ui, gs, query, rect, response);
+            self.action(ui, gs, query, rect, response);
+        } else {
+            self.control(
+                ui,
+                gs,
+                response,
+                #[cfg(target_arch = "wasm32")]
+                &web_result,
+            );
         }
 
-        self.control(
-            ui,
-            gs,
-            response,
-            #[cfg(target_arch = "wasm32")]
-            &web_result,
-        );
+        self.prev_modifiers = ui.ctx().input(|input| input.modifiers);
     }
 
     /// Handle action.
@@ -503,20 +508,13 @@ impl SceneInput {
                 let pos = (interact_pos - rect.min).to_pos2();
                 *query = Query::measurement_locate_hit(pos, gs.measurement.hit_method, tx.clone());
             }
-            Some(app::Action::Selection {
-                method,
-                immediate,
-                brush_radius,
-            }) => {
-                // Brush radius
-                if *method == app::SelectionMethod::Brush {
-                    let scroll_delta = ui
-                        .ctx()
-                        .input(|input| (input.raw_scroll_delta.y as i32).signum());
-
-                    *brush_radius = (*brush_radius as i32 + scroll_delta).clamp(1, 200) as u32;
-                    gs.selection.brush_radius = *brush_radius;
-                }
+            Some(app::Action::Selection) => {
+                let app::Selection {
+                    method,
+                    operation,
+                    immediate,
+                    brush_radius,
+                } = &mut gs.selection;
 
                 // Pos
                 let Some(hover_pos) = response.hover_pos() else {
@@ -531,18 +529,27 @@ impl SceneInput {
 
                 let pos = Vec2::from_array((hover_pos - rect.min).to_pos2().into());
 
+                // Brush radius
+                if *method == app::SelectionMethod::Brush {
+                    let scroll_delta = ui
+                        .ctx()
+                        .input(|input| (input.raw_scroll_delta.y as i32).signum());
+
+                    *brush_radius = (*brush_radius as i32 + scroll_delta).clamp(1, 200) as u32;
+                }
+
                 // Operation
                 let (shift, ctrl) = ui
                     .ctx()
                     .input(|input| (input.modifiers.shift_only(), input.modifiers.command_only()));
 
-                let op = if shift {
-                    gs::QuerySelectionOp::Add
+                if shift {
+                    *operation = gs::QuerySelectionOp::Add;
                 } else if ctrl {
-                    gs::QuerySelectionOp::Remove
-                } else {
-                    gs::QuerySelectionOp::Set
-                };
+                    *operation = gs::QuerySelectionOp::Remove;
+                } else if self.prev_modifiers.shift_only() || self.prev_modifiers.command_only() {
+                    *operation = gs::QuerySelectionOp::Set;
+                }
 
                 // End
                 if ui
@@ -551,7 +558,7 @@ impl SceneInput {
                 {
                     *query = Query::selection(
                         Some(QuerySelectionAction::End),
-                        op,
+                        *operation,
                         *immediate,
                         *brush_radius,
                         pos,
@@ -564,7 +571,7 @@ impl SceneInput {
                     .ctx()
                     .input(|input| input.pointer.button_down(egui::PointerButton::Primary))
                 {
-                    *query = Query::selection(None, op, *immediate, *brush_radius, pos);
+                    *query = Query::selection(None, *operation, *immediate, *brush_radius, pos);
                     return;
                 }
 
@@ -583,7 +590,7 @@ impl SceneInput {
                     _ => None,
                 };
 
-                *query = Query::selection(action, op, *immediate, *brush_radius, pos);
+                *query = Query::selection(action, *operation, *immediate, *brush_radius, pos);
             }
             None => {
                 *query = Query::none();
@@ -649,6 +656,10 @@ impl SceneInput {
         response: &egui::Response,
         #[cfg(target_arch = "wasm32")] web_result: &SceneInputWebEventResult,
     ) {
+        if !response.contains_pointer() {
+            return;
+        }
+
         match gs.camera.control {
             app::CameraControl::FirstPerson(_) => {
                 self.control_by_first_person(

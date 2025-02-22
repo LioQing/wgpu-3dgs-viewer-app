@@ -53,36 +53,41 @@ impl Transform {
     fn model(&mut self, ui: &mut egui::Ui, transform: &mut app::GaussianSplattingModelTransform) {
         egui::Grid::new("model_transform_grid").show(ui, |ui| {
             macro_rules! value {
-                ($ui: expr, $value: expr) => {
-                    $ui.add(
-                        egui::DragValue::new(&mut $value)
-                            .speed(0.01)
-                            .fixed_decimals(4),
-                    );
+                ($ui:expr, $axis:expr, $value:expr) => {
+                    $ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x /= 2.0;
+
+                        ui.label($axis);
+                        ui.add(
+                            egui::DragValue::new(&mut $value)
+                                .speed(0.01)
+                                .fixed_decimals(4),
+                        );
+                    });
                 };
             }
 
             ui.label("Position");
             ui.horizontal(|ui| {
-                value!(ui, transform.pos.x);
-                value!(ui, transform.pos.y);
-                value!(ui, transform.pos.z);
+                value!(ui, "X", transform.pos.x);
+                value!(ui, "Y", transform.pos.y);
+                value!(ui, "Z", transform.pos.z);
             });
             ui.end_row();
 
             ui.label("Rotation");
             ui.horizontal(|ui| {
-                value!(ui, transform.rot.x);
-                value!(ui, transform.rot.y);
-                value!(ui, transform.rot.z);
+                value!(ui, "X", transform.rot.x);
+                value!(ui, "Y", transform.rot.y);
+                value!(ui, "Z", transform.rot.z);
             });
             ui.end_row();
 
             ui.label("Scale");
             ui.horizontal(|ui| {
-                value!(ui, transform.scale.x);
-                value!(ui, transform.scale.y);
-                value!(ui, transform.scale.z);
+                value!(ui, "X", transform.scale.x);
+                value!(ui, "Y", transform.scale.y);
+                value!(ui, "Z", transform.scale.z);
             });
             ui.end_row();
         });
@@ -123,13 +128,15 @@ impl Transform {
             });
             ui.end_row();
 
-            ui.label("SH Degree");
+            ui.label("SH Degree")
+                .on_hover_text("Degree of spherical harmonics");
             let mut deg = transform.sh_deg.degree();
             ui.add(egui::Slider::new(&mut deg, 0..=3));
             transform.sh_deg = gs::GaussianShDegree::new(deg).expect("SH degree");
             ui.end_row();
 
-            ui.label("No SH0");
+            ui.label("No SH0")
+                .on_hover_text("Exclude the 0th degree of spherical harmonics");
             ui.add(util::toggle(&mut transform.no_sh0));
             ui.end_row();
         });
