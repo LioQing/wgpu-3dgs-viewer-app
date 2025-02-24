@@ -27,6 +27,7 @@ wgpu-3dgs-viewer = { git = "https://github.com/LioQing/wgpu-3dgs-viewer.git", fe
 bytemuck = "1.21.0"
 oneshot = "0.1.9"
 paste = "1.0.15"
+num-format = "0.4.4"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

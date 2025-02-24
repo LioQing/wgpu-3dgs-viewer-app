@@ -11,6 +11,7 @@ use eframe::{
     wgpu::{self},
 };
 use glam::*;
+use num_format::ToFormattedString;
 use strum::IntoEnumIterator;
 use wgpu_3dgs_viewer::{self as gs, QueryVariant, Texture};
 
@@ -33,12 +34,6 @@ pub struct Scene {
     /// The previous FPS.
     fps: f32,
 
-    /// The original model size.
-    original_size: usize,
-
-    /// The compressed model size.
-    compressed_size: usize,
-
     /// Is scene initialized, i.e. viewer is created.
     initialized: bool,
 
@@ -55,8 +50,6 @@ impl Tab for Scene {
             input: SceneInput::new(),
             fps_interval: 0.0,
             fps: 0.0,
-            original_size: 0,
-            compressed_size: 0,
             initialized: false,
             query: Query::none(),
         }
@@ -73,19 +66,19 @@ impl Tab for Scene {
                     log::debug!("Gaussian splatting loaded");
 
                     self.initialized = false;
-                    self.empty(ui, unloaded);
+                    self.empty(ui, unloaded, &state.compressions);
 
                     Some(app::Loadable::loaded(gs))
                 }
                 Ok(Err(err)) => {
                     log::debug!("Error loading Gaussian splatting: {err}");
 
-                    self.empty(ui, unloaded);
+                    self.empty(ui, unloaded, &state.compressions);
 
                     Some(app::Loadable::error(err))
                 }
                 _ => {
-                    self.empty(ui, unloaded);
+                    self.empty(ui, unloaded, &state.compressions);
 
                     None
                 }
@@ -119,6 +112,7 @@ impl Scene {
         &mut self,
         ui: &mut egui::Ui,
         unloaded: &mut Unloaded<app::GaussianSplatting, String>,
+        compressions: &app::Compressions,
     ) {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.spacing().item_spacing.y);
@@ -131,12 +125,17 @@ impl Scene {
                 let task = rfd::AsyncFileDialog::new()
                     .set_title("Open a PLY file")
                     .pick_file();
+                let compressions = compressions.clone();
 
                 util::exec_task(async move {
                     if let Some(file) = task.await {
                         let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplatting::new(file.file_name(), &mut reader)
-                            .map_err(|e| e.to_string());
+                        let gs = app::GaussianSplatting::new(
+                            file.file_name(),
+                            &mut reader,
+                            compressions,
+                        )
+                        .map_err(|e| e.to_string());
 
                         tx.send(gs).expect("send gs");
                         ctx.request_repaint();
@@ -163,6 +162,7 @@ impl Scene {
                         true => app::GaussianSplatting::new(
                             file.name.clone(),
                             &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
+                            compressions.clone(),
                         )
                         .map_err(|e| e.to_string()),
                         false => std::fs::read(file.path.as_ref().expect("file path").clone())
@@ -172,6 +172,7 @@ impl Scene {
                                 app::GaussianSplatting::new(
                                     file.name.clone(),
                                     &mut Cursor::new(data),
+                                    compressions.clone(),
                                 )
                                 .map_err(|e| e.to_string())
                             }),
@@ -303,6 +304,8 @@ impl Scene {
                                 for sh in app::ShCompression::iter() {
                                     ui.selectable_value(&mut compressions.sh, sh, sh.to_string());
                                 }
+
+                                gs.compressions.sh = compressions.sh;
                             });
                         ui.label(util::human_readable_size(
                             match compressions.sh {
@@ -334,6 +337,8 @@ impl Scene {
                                         cov3d.to_string(),
                                     );
                                 }
+
+                                gs.compressions.cov3d = compressions.cov3d;
                             });
                         ui.label(util::human_readable_size(
                             match compressions.cov3d {
@@ -349,6 +354,12 @@ impl Scene {
                     });
 
                 ui.label("");
+
+                ui.label(format!(
+                    "Gaussian Count: {}",
+                    gs.gaussians.gaussians.len().to_formatted_string(&num_format::Locale::en)
+                ));
+
                 ui.label(format!(
                     "Original Size: {}",
                     util::human_readable_size(
@@ -365,11 +376,6 @@ impl Scene {
 
                 ui.horizontal(|ui| {
                     if ui.button("Confirm").clicked() {
-                        self.original_size =
-                            gs.gaussians.gaussians.len() * std::mem::size_of::<gs::PlyGaussianPod>();
-                        self.compressed_size =
-                            compressions.compressed_size(gs.gaussians.gaussians.len());
-
                         match SceneResource::new(
                             frame.wgpu_render_state().expect("render state"),
                             &gs.gaussians,

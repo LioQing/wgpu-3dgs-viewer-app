@@ -71,12 +71,14 @@ impl App {
                     let task = rfd::AsyncFileDialog::new()
                         .set_title("Open a PLY file")
                         .pick_file();
+                    let compressions = self.state.compressions.clone();
 
                     util::exec_task(async move {
                         if let Some(file) = task.await {
                             let mut reader = Cursor::new(file.read().await);
-                            let gs = GaussianSplatting::new(file.file_name(), &mut reader)
-                                .map_err(|e| e.to_string());
+                            let gs =
+                                GaussianSplatting::new(file.file_name(), &mut reader, compressions)
+                                    .map_err(|e| e.to_string());
 
                             tx.send(gs).expect("send gs");
                             ctx.request_repaint();
@@ -390,11 +392,18 @@ pub struct GaussianSplatting {
 
     /// The selection of the Gaussian splatting.
     pub selection: Selection,
+
+    /// The used compression settings.
+    pub compressions: Compressions,
 }
 
 impl GaussianSplatting {
     /// Create a Gaussian splatting model from a PLY file.
-    pub fn new(file_name: String, ply: &mut impl BufRead) -> Result<Self, gs::Error> {
+    pub fn new(
+        file_name: String,
+        ply: &mut impl BufRead,
+        compressions: Compressions,
+    ) -> Result<Self, gs::Error> {
         let selection = Selection::new();
 
         let measurement = Measurement::new();
@@ -418,6 +427,7 @@ impl GaussianSplatting {
             action: None,
             measurement,
             selection,
+            compressions,
         })
     }
 }

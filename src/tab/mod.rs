@@ -4,6 +4,7 @@ use strum::{EnumCount, EnumIter, IntoEnumIterator};
 
 mod camera;
 mod measurement;
+mod metadata;
 mod scene;
 mod selection;
 mod transform;
@@ -11,6 +12,7 @@ mod transform;
 use crate::app;
 use camera::Camera;
 use measurement::Measurement;
+use metadata::Metadata;
 use scene::Scene;
 use selection::Selection;
 use transform::Transform;
@@ -34,6 +36,7 @@ pub enum Type {
     Camera,
     Measurement,
     Selection,
+    Metadata,
 }
 
 impl Type {
@@ -45,6 +48,7 @@ impl Type {
             Self::Camera => "Camera",
             Self::Measurement => "Measurement",
             Self::Selection => "Selection",
+            Self::Metadata => "Metadata",
         }
     }
 }
@@ -180,6 +184,7 @@ impl Viewer<'_> {
             Type::Camera => Box::new(Camera::create(self.state)) as Box<dyn Tab>,
             Type::Measurement => Box::new(Measurement::create(self.state)) as Box<dyn Tab>,
             Type::Selection => Box::new(Selection::create(self.state)) as Box<dyn Tab>,
+            Type::Metadata => Box::new(Metadata::create(self.state)) as Box<dyn Tab>,
         });
     }
 }
