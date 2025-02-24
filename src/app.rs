@@ -813,6 +813,12 @@ pub struct Selection {
 
     /// The brush radius.
     pub brush_radius: u32,
+
+    /// The highlight color.
+    pub highlight_color: egui::Color32,
+
+    /// The edit.
+    pub edit: Option<SelectionEdit>,
 }
 
 impl Selection {
@@ -823,6 +829,8 @@ impl Selection {
             operation: gs::QuerySelectionOp::Set,
             immediate: false,
             brush_radius: 40,
+            highlight_color: egui::Color32::from_rgba_unmultiplied(255, 0, 255, 127),
+            edit: None,
         }
     }
 }
@@ -841,4 +849,98 @@ pub enum SelectionMethod {
 
     /// The brush selection.
     Brush,
+}
+
+/// The selection color edit.
+#[derive(Debug, Clone, Copy)]
+pub enum SelectionColorEdit {
+    /// HSV.
+    Hsv(Vec3),
+
+    /// Override RGB.
+    OverrideColor(Vec3),
+}
+
+impl SelectionColorEdit {
+    /// Create a new selection color edit.
+    pub fn new() -> Self {
+        Self::Hsv(Vec3::new(0.0, 1.0, 1.0))
+    }
+}
+
+impl From<SelectionColorEdit> for Vec3 {
+    fn from(val: SelectionColorEdit) -> Self {
+        match val {
+            SelectionColorEdit::Hsv(hsv) => hsv,
+            SelectionColorEdit::OverrideColor(rgb) => rgb,
+        }
+    }
+}
+
+impl Default for SelectionColorEdit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The selection edit.
+#[derive(Debug, Clone)]
+pub struct SelectionEdit {
+    /// Hidden.
+    pub hidden: bool,
+
+    /// The color.
+    pub color: SelectionColorEdit,
+
+    /// The contrast.
+    pub contrast: f32,
+
+    /// The exposure.
+    pub exposure: f32,
+
+    /// The gamma.
+    pub gamma: f32,
+
+    /// The alpha.
+    pub alpha: f32,
+}
+
+impl SelectionEdit {
+    /// Create a new selection edit.
+    pub fn new() -> Self {
+        Self {
+            hidden: false,
+            color: SelectionColorEdit::new(),
+            contrast: 0.0,
+            exposure: 0.0,
+            gamma: 1.0,
+            alpha: 1.0,
+        }
+    }
+
+    /// To [`gs::GaussianEditPod`].
+    pub fn to_pod(&self) -> gs::GaussianEditPod {
+        let mut flag = gs::GaussianEditFlag::ENABLED;
+        if self.hidden {
+            flag |= gs::GaussianEditFlag::HIDDEN;
+        }
+        if matches!(self.color, SelectionColorEdit::OverrideColor(..)) {
+            flag |= gs::GaussianEditFlag::OVERRIDE_COLOR;
+        }
+
+        gs::GaussianEditPod::new(
+            flag,
+            self.color.into(),
+            self.contrast,
+            self.exposure,
+            self.gamma,
+            self.alpha,
+        )
+    }
+}
+
+impl Default for SelectionEdit {
+    fn default() -> Self {
+        Self::new()
+    }
 }

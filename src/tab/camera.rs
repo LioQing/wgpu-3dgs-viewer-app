@@ -80,7 +80,7 @@ impl Tab for Camera {
                         format!(
                             "• Click on the viewer to focus, press Esc to unfocus\n\
                              • WASD to move, Space to go up, Shift to go down\n\
-                             • Mouse to look around{}",
+                             • IJKL or Mouse to look around{}",
                             if cfg!(target_arch = "wasm32") {
                                 "\n• In some browsers, focusing immediately after unfocusing may \
                                 not work"
@@ -163,28 +163,16 @@ impl Tab for Camera {
 
                 ui.label("Field of View");
                 let mut fov_degree = camera.control.vertical_fov().to_degrees();
-                ui.add(
-                    egui::Slider::new(&mut fov_degree, 30.0..=120.0)
-                        .step_by(1.0)
-                        .fixed_decimals(0),
-                );
+                ui.add(egui::Slider::new(&mut fov_degree, 30.0..=120.0).integer());
                 *camera.control.vertical_fov_mut() = fov_degree.to_radians();
                 ui.end_row();
 
                 ui.label("Movement Speed");
-                ui.add(
-                    egui::Slider::new(&mut camera.speed, 0.0..=10.0)
-                        .step_by(0.01)
-                        .fixed_decimals(2),
-                );
+                ui.add(egui::Slider::new(&mut camera.speed, 0.0..=10.0).fixed_decimals(2));
                 ui.end_row();
 
                 ui.label("Rotation Sensitivity");
-                ui.add(
-                    egui::Slider::new(&mut camera.sensitivity, 0.0..=1.0)
-                        .step_by(0.01)
-                        .fixed_decimals(2),
-                );
+                ui.add(egui::Slider::new(&mut camera.sensitivity, 0.0..=1.0).fixed_decimals(2));
                 ui.end_row();
             });
         });

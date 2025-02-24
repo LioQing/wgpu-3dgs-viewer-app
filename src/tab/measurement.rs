@@ -141,7 +141,6 @@ impl Measurement {
                         ui.label("Line Width");
                         ui.add(
                             egui::Slider::new(&mut hit_pair.line_width, 0.0..=5.0)
-                                .step_by(0.01)
                                 .fixed_decimals(2),
                         );
                         ui.end_row();

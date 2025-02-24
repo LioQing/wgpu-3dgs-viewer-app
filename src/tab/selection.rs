@@ -1,3 +1,4 @@
+use glam::*;
 use wgpu_3dgs_viewer as gs;
 
 use crate::app;
@@ -39,7 +40,7 @@ impl Tab for Selection {
                 ui.label("Selection Method");
                 ui.horizontal(|ui| {
                     macro_rules! value {
-                        ($ui: expr, $action: expr, $value: expr, $label: ident, $display: expr) => {
+                        ($ui:expr, $action:expr, $value:expr, $label:ident, $display:expr) => {
                             if $ui
                                 .selectable_label($value == app::SelectionMethod::$label, $display)
                                 .clicked()
@@ -57,7 +58,7 @@ impl Tab for Selection {
                 ui.label("Operation");
                 ui.horizontal(|ui| {
                     macro_rules! value {
-                        ($ui: expr, $action: expr, $value: expr, $label: ident, $display: expr) => {
+                        ($ui:expr, $action:expr, $value:expr, $label:ident, $display:expr) => {
                             if $ui
                                 .selectable_label($value == gs::QuerySelectionOp::$label, $display)
                                 .clicked()
@@ -78,6 +79,10 @@ impl Tab for Selection {
                 ui.checkbox(&mut selection.immediate, "");
                 ui.end_row();
 
+                ui.label("Highlight Color");
+                ui.color_edit_button_srgba(&mut selection.highlight_color);
+                ui.end_row();
+
                 if selection.method == app::SelectionMethod::Brush {
                     ui.label("Brush Radius");
                     ui.add(egui::Slider::new(&mut selection.brush_radius, 1..=100).integer());
@@ -85,17 +90,108 @@ impl Tab for Selection {
                 }
             });
 
-            match action {
-                Some(app::Action::Selection { .. }) => {
-                    if ui.button("Selecting...").clicked() {
-                        *action = None;
+            ui.horizontal(|ui| {
+                match action {
+                    Some(app::Action::Selection { .. }) => {
+                        if ui.button("Selecting...").clicked() {
+                            *action = None;
+                        }
+                    }
+                    _ => {
+                        if ui.button("Select").clicked() {
+                            *action = Some(app::Action::Selection);
+                        }
                     }
                 }
-                _ => {
-                    if ui.button("Select").clicked() {
-                        *action = Some(app::Action::Selection);
+
+                let mut editing = selection.edit.is_some();
+                if ui
+                    .checkbox(&mut editing, "Edit")
+                    .on_hover_text("When editing, selected Gaussians are not highlighted")
+                    .changed()
+                {
+                    if editing {
+                        selection.edit = Some(app::SelectionEdit::default());
+                    } else {
+                        selection.edit = None;
                     }
                 }
+            });
+
+            if let Some(edit) = &mut selection.edit {
+                if ui.button("Reset Parameters").clicked() {
+                    *edit = app::SelectionEdit::default();
+                }
+
+                egui::Grid::new("selection_edit_grid").show(ui, |ui| {
+                    ui.label("Hidden");
+                    ui.checkbox(&mut edit.hidden, "");
+                    ui.end_row();
+
+                    ui.label("Color");
+                    ui.horizontal(|ui| {
+                        macro_rules! value {
+                            ($ui:expr, $value:expr, $label:ident, $display:expr, $val:expr) => {
+                                if $ui
+                                    .selectable_label(
+                                        matches!($value, app::SelectionColorEdit::$label(..)),
+                                        $display,
+                                    )
+                                    .clicked()
+                                {
+                                    $value = app::SelectionColorEdit::$label($val);
+                                }
+                            };
+                        }
+
+                        value!(ui, edit.color, Hsv, "HSV", vec3(0.0, 1.0, 1.0));
+                        value!(
+                            ui,
+                            edit.color,
+                            OverrideColor,
+                            "Override Color",
+                            vec3(1.0, 1.0, 1.0)
+                        );
+                    });
+                    ui.end_row();
+
+                    match &mut edit.color {
+                        app::SelectionColorEdit::Hsv(hsv) => {
+                            ui.label("Hue");
+                            ui.add(egui::Slider::new(&mut hsv.x, 0.0..=1.0).fixed_decimals(2));
+                            ui.end_row();
+
+                            ui.label("Saturation");
+                            ui.add(egui::Slider::new(&mut hsv.y, 0.0..=2.0).fixed_decimals(2));
+                            ui.end_row();
+
+                            ui.label("Brightness");
+                            ui.add(egui::Slider::new(&mut hsv.z, 0.0..=2.0).fixed_decimals(2));
+                            ui.end_row();
+                        }
+                        app::SelectionColorEdit::OverrideColor(rgb) => {
+                            ui.label("RGB Color");
+                            ui.color_edit_button_rgb(bytemuck::cast_mut(rgb));
+                            ui.end_row();
+                        }
+                    }
+
+                    ui.label("Opacity");
+                    ui.add(egui::Slider::new(&mut edit.alpha, 0.0..=2.0).fixed_decimals(2));
+                    ui.end_row();
+
+                    ui.label("Contrast");
+                    ui.add(egui::Slider::new(&mut edit.contrast, -1.0..=1.0).fixed_decimals(2));
+                    ui.end_row();
+
+                    ui.label("Exposure");
+                    ui.add(egui::Slider::new(&mut edit.exposure, -5.0..=5.0).fixed_decimals(2));
+                    ui.end_row();
+
+                    ui.label("Gamma");
+                    ui.add(egui::Slider::new(&mut edit.gamma, 0.0..=5.0).fixed_decimals(2));
+                    ui.end_row();
+                });
             }
         });
     }

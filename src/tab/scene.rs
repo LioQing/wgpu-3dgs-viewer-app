@@ -244,6 +244,13 @@ impl Scene {
                     viewer_size: Vec2::from_array(rect.size().into()),
                     gaussian_count: gs.gaussians.gaussians.len(),
                     query: self.query.clone(),
+                    selection: match &gs.selection.edit {
+                        Some(edit) => SceneCallbackSelection::Edit(edit.to_pod()),
+                        None => SceneCallbackSelection::Highlight(gs::SelectionHighlightPod::new(
+                            U8Vec4::from_array(gs.selection.highlight_color.to_array()).as_vec4()
+                                / 255.0,
+                        )),
+                    },
                 },
             ));
         });
@@ -520,6 +527,7 @@ impl SceneInput {
                     operation,
                     immediate,
                     brush_radius,
+                    ..
                 } = &mut gs.selection;
 
                 // Pos
@@ -1250,6 +1258,8 @@ impl Viewer {
     viewer_getters!(postprocess_indirect_args_buffer);
     viewer_getters!(selection_highlight_buffer);
     viewer_getters!(selection_buffer);
+    viewer_getters!(gaussians_edit_buffer);
+    viewer_getters!(selection_edit_buffer);
     viewer_getters!(query_texture);
 
     viewer_getters!(preprocessor);
@@ -1267,6 +1277,11 @@ impl Viewer {
         viewer_call!(self, fn update_camera, queue, camera, texture_size);
     }
 
+    /// Update the camera with [`gs::CameraPod`].
+    pub fn update_camera_with_pod(&mut self, queue: &wgpu::Queue, camera: &gs::CameraPod) {
+        viewer_call!(self, fn update_camera_with_pod, queue, camera);
+    }
+
     /// Update the query.
     pub fn update_query(&mut self, queue: &wgpu::Queue, query: &gs::QueryPod) {
         viewer_call!(self, fn update_query, queue, query);
@@ -1281,6 +1296,15 @@ impl Viewer {
         scale: Vec3,
     ) {
         viewer_call!(self, fn update_model_transform, queue, pos, quat, scale);
+    }
+
+    /// Update the model transform with [`gs::ModelTransformPod`].
+    pub fn update_model_transform_with_pod(
+        &mut self,
+        queue: &wgpu::Queue,
+        model: &gs::ModelTransformPod,
+    ) {
+        viewer_call!(self, fn update_model_transform_with_pod, queue, model);
     }
 
     /// Update the Gaussian transform.
@@ -1303,9 +1327,63 @@ impl Viewer {
         );
     }
 
+    /// Update the Gaussian transform with [`gs::GaussianTransformPod`].
+    pub fn update_gaussian_transform_with_pod(
+        &mut self,
+        queue: &wgpu::Queue,
+        gaussian: &gs::GaussianTransformPod,
+    ) {
+        viewer_call!(self, fn update_gaussian_transform_with_pod, queue, gaussian);
+    }
+
     /// Update the selection highlight.
     pub fn update_selection_highlight(&mut self, queue: &wgpu::Queue, color: Vec4) {
         viewer_call!(self, fn update_selection_highlight, queue, color);
+    }
+
+    /// Update the selection highlight with [`gs::SelectionHighlightPod`].
+    pub fn update_selection_highlight_with_pod(
+        &mut self,
+        queue: &wgpu::Queue,
+        highlight: &gs::SelectionHighlightPod,
+    ) {
+        viewer_call!(self, fn update_selection_highlight_with_pod, queue, highlight);
+    }
+
+    /// Update the selection edit.
+    ///
+    /// Set [`gs::GaussianEditFlag::ENABLED`] to apply the edits on the selected Gaussians.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_selection_edit(
+        &mut self,
+        queue: &wgpu::Queue,
+        flag: gs::GaussianEditFlag,
+        hsv: Vec3,
+        contrast: f32,
+        exposure: f32,
+        gamma: f32,
+        alpha: f32,
+    ) {
+        viewer_call!(
+            self,
+            fn update_selection_edit,
+            queue,
+            flag,
+            hsv,
+            contrast,
+            exposure,
+            gamma,
+            alpha
+        );
+    }
+
+    /// Update the selection edit with [`gs::GaussianEditPod`].
+    pub fn update_selection_edit_with_pod(
+        &mut self,
+        queue: &wgpu::Queue,
+        edit: &gs::GaussianEditPod,
+    ) {
+        viewer_call!(self, fn update_selection_edit_with_pod, queue, edit);
     }
 
     /// Update the query texture size.
@@ -1463,6 +1541,16 @@ enum SceneQueryStage {
     },
 }
 
+/// The scene callback selection highlight or edit.
+#[derive(Debug)]
+pub enum SceneCallbackSelection {
+    /// The selection highlight.
+    Highlight(gs::SelectionHighlightPod),
+
+    /// The selection edit.
+    Edit(gs::GaussianEditPod),
+}
+
 /// The scene callback.
 struct SceneCallback {
     /// The highlighted measurement hit pair.
@@ -1485,6 +1573,9 @@ struct SceneCallback {
 
     /// The query.
     query: Query,
+
+    /// The selection highlight or edit.
+    selection: SceneCallbackSelection,
 }
 
 impl egui_wgpu::CallbackTrait for SceneCallback {
@@ -1569,6 +1660,28 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             self.gaussian_transform.sh_deg,
             self.gaussian_transform.no_sh0,
         );
+        match &self.selection {
+            SceneCallbackSelection::Highlight(pod) => {
+                viewer
+                    .lock()
+                    .expect("viewer")
+                    .update_selection_edit_with_pod(queue, &gs::GaussianEditPod::default());
+                viewer
+                    .lock()
+                    .expect("viewer")
+                    .update_selection_highlight_with_pod(queue, pod);
+            }
+            SceneCallbackSelection::Edit(pod) => {
+                viewer
+                    .lock()
+                    .expect("viewer")
+                    .update_selection_edit_with_pod(queue, pod);
+                viewer
+                    .lock()
+                    .expect("viewer")
+                    .update_selection_highlight(queue, vec4(0.0, 0.0, 0.0, 0.0));
+            }
+        }
 
         if !self.measurement_visible_hit_pairs.is_empty() {
             measurement_renderer.update_hit_pairs(
