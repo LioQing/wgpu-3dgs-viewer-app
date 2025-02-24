@@ -69,15 +69,19 @@ fn main() {
 
 fn wgpu_configuration() -> egui_wgpu::WgpuConfiguration {
     egui_wgpu::WgpuConfiguration {
-        wgpu_setup: egui_wgpu::WgpuSetup::CreateNew {
-            supported_backends: wgpu::Backends::PRIMARY,
+        wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+            instance_descriptor: wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                ..Default::default()
+            },
             power_preference: wgpu::PowerPreference::HighPerformance,
             device_descriptor: Arc::new(|adapter| wgpu::DeviceDescriptor {
                 label: Some("Device"),
                 required_limits: adapter.limits(),
                 ..Default::default()
             }),
-        },
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }

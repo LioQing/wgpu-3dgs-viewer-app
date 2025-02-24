@@ -11,16 +11,9 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 [dependencies]
-egui = { version = "0.30", features = ["serde"] }
-egui_dock = { version = "0.15", features = ["serde"] }
+egui = { version = "0.31", features = ["serde"] }
+egui_dock = { version = "0.16", features = ["serde"] }
 egui-modal = "0.6.0"
-eframe = { version = "0.30", default-features = false, features = [
-    "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
-    "default_fonts", # Embed the default egui fonts.
-    "wgpu",          # Use the wgpu rendering backend.
-    "persistence",   # Enable restoring app state when restarting the app.
-    "wayland",       # To support Linux (and CI)
-] }
 log = "0.4"
 serde = { version = "1.0.217", features = ["derive"] }
 strum = { version = "0.26", features = ["derive"] }
@@ -39,11 +32,24 @@ paste = "1.0.15"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
 futures = "0.3.31"
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts", # Embed the default egui fonts.
+    "wgpu",          # Use the wgpu rendering backend.
+    "persistence",   # Enable restoring app state when restarting the app.
+    "wayland",       # To support Linux (and CI)
+] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4.50"
-web-sys = "0.3.70"              # to access the DOM (to hide the loading text)
+web-sys = "0.3.70" # to access the DOM (to hide the loading text)
+eframe = { version = "0.31", default-features = false, features = [
+    "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
+    "default_fonts", # Embed the default egui fonts.
+    "wgpu",          # Use the wgpu rendering backend.
+    "persistence",   # Enable restoring app state when restarting the app.
+    "wayland",       # To support Linux (and CI)
+] }
 
 [profile.release]
 opt-level = 2 # fast and small wasm

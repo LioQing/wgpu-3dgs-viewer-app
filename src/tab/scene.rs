@@ -1368,7 +1368,7 @@ impl SceneResource {
         #[allow(clippy::arc_with_non_send_sync)]
         let viewer = Arc::new(Mutex::new(
             Viewer::new(
-                render_state.device.as_ref(),
+                &render_state.device,
                 render_state.target_format,
                 uvec2(1, 1),
                 gaussians,
@@ -1379,7 +1379,7 @@ impl SceneResource {
 
         log::debug!("Creating measurement renderer");
         let measurement_renderer = renderer::Measurement::new(
-            render_state.device.as_ref(),
+            &render_state.device,
             render_state.target_format,
             viewer.lock().expect("viewer").camera_buffer(),
         );
@@ -1392,7 +1392,7 @@ impl SceneResource {
             let viewer = viewer.lock().expect("viewer");
 
             gs::QueryToolset::new(
-                render_state.device.as_ref(),
+                &render_state.device,
                 viewer.query_texture(),
                 viewer.camera_buffer(),
             )
@@ -1400,14 +1400,14 @@ impl SceneResource {
 
         log::debug!("Creating query texture overlay");
         let query_texture_overlay = gs::QueryTextureOverlay::new(
-            render_state.device.as_ref(),
+            &render_state.device,
             render_state.target_format,
             viewer.lock().expect("viewer").query_texture(),
         );
 
         log::debug!("Creating query cursor");
         let query_cursor = gs::QueryCursor::new(
-            render_state.device.as_ref(),
+            &render_state.device,
             render_state.target_format,
             viewer.lock().expect("viewer").camera_buffer(),
         );
