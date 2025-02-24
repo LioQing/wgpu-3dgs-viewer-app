@@ -552,17 +552,12 @@ impl Camera {
                     .iter()
                     .map(|g| (model_transform.quat() * g.pos).z - target.z)
                     .fold(f32::INFINITY, |a, b| a.min(b));
-        let control = CameraOrbitControl {
-            target,
-            pos,
-            z: 0.1..1e4,
-            vertical_fov: 60f32.to_radians(),
-        };
+        let control = CameraOrbitControl::new(target, pos, 0.1..1e4, 60f32.to_radians());
 
         Self {
             control: CameraControl::Orbit(control),
             speed: 1.0,
-            sensitivity: 0.3,
+            sensitivity: 0.5,
         }
     }
 }
@@ -570,14 +565,14 @@ impl Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            control: CameraControl::Orbit(CameraOrbitControl {
-                target: Vec3::ZERO,
-                pos: Vec3::ZERO,
-                z: 0.1..1e4,
-                vertical_fov: 60f32.to_radians(),
-            }),
+            control: CameraControl::Orbit(CameraOrbitControl::new(
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.1..1e4,
+                60f32.to_radians(),
+            )),
             speed: 1.0,
-            sensitivity: 0.3,
+            sensitivity: 0.5,
         }
     }
 }
@@ -596,6 +591,18 @@ pub struct CameraOrbitControl {
 
     /// The vertical FOV.
     pub vertical_fov: f32,
+}
+
+impl CameraOrbitControl {
+    /// Create a new camera.
+    pub fn new(target: Vec3, pos: Vec3, z: Range<f32>, vertical_fov: f32) -> Self {
+        Self {
+            target,
+            pos,
+            z,
+            vertical_fov,
+        }
+    }
 }
 
 impl gs::CameraTrait for CameraOrbitControl {
@@ -627,6 +634,22 @@ impl CameraControl {
         match self {
             Self::FirstPerson(control) => &mut control.pos,
             Self::Orbit(control) => &mut control.pos,
+        }
+    }
+
+    /// Get the field of view in radian.
+    pub fn vertical_fov(&self) -> f32 {
+        match self {
+            Self::FirstPerson(control) => control.vertical_fov,
+            Self::Orbit(control) => control.vertical_fov,
+        }
+    }
+
+    /// Get the field of view mutably in radian.
+    pub fn vertical_fov_mut(&mut self) -> &mut f32 {
+        match self {
+            Self::FirstPerson(control) => &mut control.vertical_fov,
+            Self::Orbit(control) => &mut control.vertical_fov,
         }
     }
 

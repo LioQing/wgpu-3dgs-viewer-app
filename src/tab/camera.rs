@@ -161,6 +161,16 @@ impl Tab for Camera {
                 });
                 ui.end_row();
 
+                ui.label("Field of View");
+                let mut fov_degree = camera.control.vertical_fov().to_degrees();
+                ui.add(
+                    egui::Slider::new(&mut fov_degree, 30.0..=120.0)
+                        .step_by(1.0)
+                        .fixed_decimals(0),
+                );
+                *camera.control.vertical_fov_mut() = fov_degree.to_radians();
+                ui.end_row();
+
                 ui.label("Movement Speed");
                 ui.add(
                     egui::Slider::new(&mut camera.speed, 0.0..=10.0)

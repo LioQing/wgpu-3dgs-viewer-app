@@ -757,9 +757,26 @@ impl SceneInput {
         #[cfg(target_arch = "wasm32")]
         let mouse_delta = web_result.mouse_move;
 
-        let rotation = mouse_delta * gs.camera.sensitivity * dt;
-        control.yaw_by(-rotation.x);
-        control.pitch_by(-rotation.y);
+        let mut rotation = -mouse_delta * 0.5;
+
+        if ui.ctx().input(|input| input.key_down(egui::Key::I)) {
+            rotation.y += 1.0;
+        }
+        if ui.ctx().input(|input| input.key_down(egui::Key::K)) {
+            rotation.y -= 1.0;
+        }
+
+        if ui.ctx().input(|input| input.key_down(egui::Key::J)) {
+            rotation.x += 1.0;
+        }
+        if ui.ctx().input(|input| input.key_down(egui::Key::L)) {
+            rotation.x -= 1.0;
+        }
+
+        rotation *= gs.camera.sensitivity;
+
+        control.yaw_by(rotation.x * dt);
+        control.pitch_by(rotation.y * dt);
     }
 
     /// Handle the scene camera by orbit control.
