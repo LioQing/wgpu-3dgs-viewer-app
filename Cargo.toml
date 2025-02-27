@@ -19,7 +19,7 @@ serde = { version = "1.0.217", features = ["derive"] }
 strum = { version = "0.26", features = ["derive"] }
 glam = { version = "0.29.2", features = ["bytemuck"] }
 rfd = "0.15.2"
-wgpu-3dgs-viewer = { git = "https://github.com/LioQing/wgpu-3dgs-viewer.git", features = [
+wgpu-3dgs-viewer = { version = "0.1.0", features = [
     "query-toolset",
     "query-texture-overlay",
     "query-cursor",

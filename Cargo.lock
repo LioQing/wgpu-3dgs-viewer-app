@@ -3410,7 +3410,8 @@ dependencies = [
 [[package]]
 name = "wgpu-3dgs-viewer"
 version = "0.1.0"
-source = "git+https://github.com/LioQing/wgpu-3dgs-viewer.git#511eef10f06cbdbded3728234c500a4a6e119f0f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c87f0d9c6a54cab67fb5a079ba67279be6de545b01cff1d27e963acd92d6a8f6"
 dependencies = [
  "bitflags 2.8.0",
  "bytemuck",
