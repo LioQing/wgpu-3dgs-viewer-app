@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::Cursor,
     marker::PhantomData,
     sync::{mpsc, Arc, Mutex},
@@ -9,6 +10,7 @@ use eframe::wasm_bindgen::JsCast;
 
 use eframe::{egui_wgpu, wgpu};
 use glam::*;
+use itertools::Itertools;
 use num_format::ToFormattedString;
 use strum::IntoEnumIterator;
 use wgpu_3dgs_viewer::{self as gs, QueryVariant, Texture};
@@ -16,6 +18,67 @@ use wgpu_3dgs_viewer::{self as gs, QueryVariant, Texture};
 use crate::{app, renderer, util};
 
 use super::Tab;
+
+/// The macro to apply the same function to [`SceneResource`] regardless of the compression.
+macro_rules! apply_to_scene_resource {
+    ($frame:ident, $compressions:expr, |$res:ident| $func:block) => {
+        macro_rules! case {
+            ($sh:ident, $cov3d:ident) => {
+                crate::app::Compressions {
+                    sh: crate::app::ShCompression::$sh,
+                    cov3d: crate::app::Cov3dCompression::$cov3d,
+                }
+            };
+        }
+
+        macro_rules! apply {
+            ($sh:ident, $cov3d:ident) => {
+                paste::paste! {
+                    let mut lock = $frame
+                        .wgpu_render_state()
+                        .expect("render state")
+                        .renderer
+                        .write();
+                    let $res = lock
+                        .callback_resources
+                        .get_mut::<crate::tab::scene::SceneResource::<
+                            wgpu_3dgs_viewer::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]
+                        >>()
+                        .expect("scene resource");
+
+                    $func
+                }
+            };
+        }
+
+        match &$compressions {
+            case!(Single, Single) => {
+                apply!(Single, Single);
+            }
+            case!(Single, Half) => {
+                apply!(Single, Half);
+            }
+            case!(Half, Single) => {
+                apply!(Half, Single);
+            }
+            case!(Half, Half) => {
+                apply!(Half, Half);
+            }
+            case!(Norm8, Single) => {
+                apply!(Norm8, Single);
+            }
+            case!(Norm8, Half) => {
+                apply!(Norm8, Half);
+            }
+            case!(Remove, Single) => {
+                apply!(None, Single);
+            }
+            case!(Remove, Half) => {
+                apply!(None, Half);
+            }
+        }
+    };
+}
 
 /// The scene tab.
 #[derive(Debug)]
@@ -195,80 +258,62 @@ impl Scene {
         frame: &mut eframe::Frame,
         gs: &mut app::GaussianSplatting,
     ) -> bool {
-        macro_rules! case {
-            ($sh:ident, $cov3d:ident) => {
-                app::Compressions {
-                    sh: app::ShCompression::$sh,
-                    cov3d: app::Cov3dCompression::$cov3d,
-                }
-            };
-        }
+        let mut loaded = true;
 
-        macro_rules! push_models {
-            ($sh:ident, $cov3d:ident, $frame:expr, $models:expr) => {
-                paste::paste! {
-                    $frame
-                        .wgpu_render_state()
-                        .expect("render state")
-                        .renderer
-                        .write()
-                        .callback_resources
-                        .get_mut::<SceneResource::<
-                            gs::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]
-                        >>()
-                        .expect("scene resource")
-                        .push_models(
-                            $frame.wgpu_render_state().expect("render state"),
-                            $models,
-                        )
-                }
-            };
-        }
+        for command in gs.scene_rx.try_iter() {
+            match command {
+                app::SceneCommand::AddModel(result) => match result {
+                    Ok(mut model) => {
+                        let mut i = 0;
+                        let mut new_file_name = model.file_name.clone();
+                        while gs.models.contains_key(&new_file_name) {
+                            i += 1;
+                            new_file_name = format!("{} ({})", model.file_name, i);
+                        }
 
-        let start_index = gs.models.len();
-        gs.additional_models_rx
-            .try_iter()
-            .inspect(|model| match model {
-                Ok(model) => log::debug!("Additional models loaded: {}", model.file_name),
-                Err(err) => log::error!("Error loading additional models: {err}"),
-            })
-            .filter_map(|model| model.ok())
-            .for_each(|model| {
-                gs.models.push(model);
-            });
+                        model.file_name = new_file_name;
 
-        if gs.models.len() > start_index {
-            let additional_models = gs.models[start_index..].iter().map(|m| &m.gaussians);
+                        log::debug!("Additional model loaded: {}", model.file_name);
 
-            match &gs.compressions {
-                case!(Single, Single) => {
-                    push_models!(Single, Single, frame, additional_models);
+                        apply_to_scene_resource!(frame, gs.compressions, |res| {
+                            res.insert_model(
+                                frame.wgpu_render_state().expect("render state"),
+                                model.file_name.to_string(),
+                                &model.gaussians,
+                            )
+                        });
+
+                        gs.models.insert(model.file_name.to_string(), model);
+                    }
+                    Err(err) => {
+                        log::error!("Error loading additional model: {err}");
+                    }
+                },
+                app::SceneCommand::RemoveModel(key) => {
+                    if gs.models.len() == 1 && gs.models.contains_key(&key) {
+                        loaded = false;
+                    } else {
+                        log::debug!("Model removed: {}", key);
+
+                        apply_to_scene_resource!(frame, gs.compressions, |res| {
+                            res.remove_model(&key)
+                        });
+
+                        gs.models.remove(&key);
+
+                        if gs.selected_model_key == key {
+                            gs.selected_model_key =
+                                gs.models.keys().next().expect("first key").clone();
+                        }
+                    }
                 }
-                case!(Single, Half) => {
-                    push_models!(Single, Half, frame, additional_models);
-                }
-                case!(Half, Single) => {
-                    push_models!(Half, Single, frame, additional_models);
-                }
-                case!(Half, Half) => {
-                    push_models!(Half, Half, frame, additional_models);
-                }
-                case!(Norm8, Single) => {
-                    push_models!(Norm8, Single, frame, additional_models);
-                }
-                case!(Norm8, Half) => {
-                    push_models!(Norm8, Half, frame, additional_models);
-                }
-                case!(Remove, Single) => {
-                    push_models!(None, Single, frame, additional_models);
-                }
-                case!(Remove, Half) => {
-                    push_models!(None, Half, frame, additional_models);
+                app::SceneCommand::UpdateMeasurementHit => {
+                    apply_to_scene_resource!(frame, gs.compressions, |res| {
+                        res.update_measurement_visible_hit_pairs(&gs.measurement.hit_pairs)
+                    });
                 }
             }
         }
-
-        let mut loaded = true;
 
         ui.horizontal(|ui| {
             let loaded_label = ui.label(format!(
@@ -308,20 +353,44 @@ impl Scene {
 
             self.input.handle(ui, gs, &mut self.query, &rect, &response);
 
+            let distances = gs
+                .models
+                .iter()
+                .map(|(k, m)| {
+                    (
+                        k,
+                        (m.world_center() - gs.camera.control.pos()).length_squared(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            macro_rules! case {
+                ($sh:ident, $cov3d:ident) => {
+                    app::Compressions {
+                        sh: app::ShCompression::$sh,
+                        cov3d: app::Cov3dCompression::$cov3d,
+                    }
+                };
+            }
+
             macro_rules! painter {
                 ($ui:expr, $rect:expr, $sh:ident, $cov3d:ident, $gs:expr) => {
                     paste::paste! {
                         $ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             $rect,
                             SceneCallback::<gs::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]> {
-                                measurement_visible_hit_pairs: $gs
-                                    .measurement
-                                    .visible_hit_pairs()
-                                    .cloned()
-                                    .collect(),
                                 gaussian_transform: $gs.gaussian_transform.clone(),
                                 model_transform: $gs.selected_model().transform.clone(),
-                                selected_model_index: $gs.selected_model_index,
+                                model_render_keys: $gs.models.iter()
+                                    .filter(|(_, m)| m.visible)
+                                    .sorted_by(|(a, _), (b, _)| {
+                                        distances.get(b).expect("distance")
+                                            .partial_cmp(&distances.get(a).expect("distance"))
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    })
+                                    .map(|(k, _)| k.clone())
+                                    .collect(),
+                                selected_model_key: $gs.selected_model_key.clone(),
                                 camera: $gs.camera.control.clone(),
                                 viewer_size: Vec2::from_array($rect.size().into()),
                                 query: self.query.clone(),
@@ -529,6 +598,7 @@ impl Scene {
                                             gs::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]
                                         >::new(
                                             $frame.wgpu_render_state().expect("render state"),
+                                            $gs.selected_model().file_name.clone(),
                                             &$gs.selected_model().gaussians,
                                         ))
                                 }
@@ -1296,10 +1366,15 @@ enum SceneInputWebEvent {
 #[derive(Debug)]
 struct SceneResource<G: gs::GaussianPod> {
     /// The viewer.
+    ///
+    /// The viewer should not be used in multiple threads in native, always use blocking code.
     viewer: Arc<Mutex<gs::MultiModelViewer<G>>>,
 
     /// The measurement renderer.
     measurement_renderer: renderer::Measurement,
+
+    /// The visible measurement hit pair.
+    measurement_visible_hit_pairs: Vec<app::MeasurementHitPair>,
 
     /// The query resource.
     ///
@@ -1319,7 +1394,7 @@ struct SceneResource<G: gs::GaussianPod> {
 
 impl<G: gs::GaussianPod> SceneResource<G> {
     /// Create a new scene resource.
-    fn new(render_state: &egui_wgpu::RenderState, gaussians: &gs::Gaussians) -> Self {
+    fn new(render_state: &egui_wgpu::RenderState, key: String, gaussians: &gs::Gaussians) -> Self {
         log::debug!("Creating viewer");
         // In WASM, the viewer is not Send nor Sync, but in native, it is.
         #[allow(clippy::arc_with_non_send_sync)]
@@ -1332,7 +1407,7 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         viewer
             .lock()
             .expect("viewer")
-            .push_model(&render_state.device, gaussians);
+            .insert_model(&render_state.device, key, gaussians);
 
         log::debug!("Creating measurement renderer");
         let measurement_renderer = renderer::Measurement::new(
@@ -1340,6 +1415,8 @@ impl<G: gs::GaussianPod> SceneResource<G> {
             render_state.target_format,
             &viewer.lock().expect("viewer").world_buffers.camera_buffer,
         );
+
+        let measurement_visible_hit_pairs = Vec::new();
 
         log::debug!("Creating query resource");
         let query_resource = None;
@@ -1374,6 +1451,7 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         Self {
             viewer,
             measurement_renderer,
+            measurement_visible_hit_pairs,
             query_resource,
             query_toolset,
             query_texture_overlay,
@@ -1381,16 +1459,46 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         }
     }
 
-    /// Push an iterator of new models.
-    fn push_models<'a>(
+    /// Insert a new model.
+    fn insert_model(
         &mut self,
         render_state: &egui_wgpu::RenderState,
-        models: impl IntoIterator<Item = &'a gs::Gaussians>,
+        key: String,
+        model: &gs::Gaussians,
     ) {
         self.viewer
             .lock()
             .expect("viewer")
-            .push_models(&render_state.device, models);
+            .insert_model(&render_state.device, key.clone(), model);
+
+        self.viewer.lock().expect("viewer").update_model_transform(
+            &render_state.queue,
+            &key,
+            Vec3::ZERO,
+            Quat::from_axis_angle(Vec3::Z, 180.0f32.to_radians()),
+            Vec3::ONE,
+        );
+    }
+
+    /// Remove a model.
+    fn remove_model(&mut self, key: &String) {
+        if self.viewer.lock().expect("viewer").models.len() == 1 {
+            log::error!("Cannot remove the last model");
+            return;
+        }
+
+        self.viewer.lock().expect("viewer").remove_model(key);
+    }
+
+    /// Update the measurement visible hit pair
+    fn update_measurement_visible_hit_pairs(&mut self, hit_pairs: &[app::MeasurementHitPair]) {
+        self.measurement_visible_hit_pairs.clear();
+        self.measurement_visible_hit_pairs.extend(
+            hit_pairs
+                .iter()
+                .filter(|hit_pair| hit_pair.visible)
+                .cloned(),
+        );
     }
 }
 
@@ -1437,18 +1545,23 @@ pub enum SceneCallbackSelection {
 }
 
 /// The scene callback.
+///
+/// This stores cheap cloneable data for the scene callback, all expensive data should be stored in
+/// the [`SceneResource`] and updated with [`apply_to_scene_resource`]. The rationale is that
+/// data stored in [`SceneResource`] would need to be memoized in some way, which adds complexity
+/// to the code for rather cheap data.
 struct SceneCallback<G: gs::GaussianPod + Send + Sync> {
-    /// The highlighted measurement hit pair.
-    measurement_visible_hit_pairs: Vec<app::MeasurementHitPair>,
-
     /// The Gaussian splatting Gaussian transform.
     gaussian_transform: app::GaussianSplattingGaussianTransform,
 
     /// The Gaussian splatting model transform.
     model_transform: app::GaussianSplattingModelTransform,
 
+    /// The model render keys.
+    model_render_keys: Vec<String>,
+
     /// The currently selected model.
-    selected_model_index: usize,
+    selected_model_key: String,
 
     /// The camera.
     camera: app::CameraControl,
@@ -1478,10 +1591,12 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
         let SceneResource {
             viewer,
             measurement_renderer,
+            measurement_visible_hit_pairs,
             query_resource,
             query_toolset,
             query_texture_overlay,
             query_cursor,
+            ..
         } = callback_resources.get_mut().expect("scene resource");
 
         // Postprocess, because eframe cannot do any compute pass after the render pass.
@@ -1492,7 +1607,9 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
                 label: Some("Postprocess Encoder"),
             });
 
-            for model in viewer.models.iter() {
+            for key in self.model_render_keys.iter() {
+                let model = &viewer.models.get(key).expect("model");
+
                 viewer.postprocessor.postprocess(
                     &mut encoder,
                     &model.bind_groups.postprocessor.0,
@@ -1546,7 +1663,7 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
         );
         viewer.lock().expect("viewer").update_model_transform(
             queue,
-            self.selected_model_index,
+            &self.selected_model_key,
             self.model_transform.pos,
             self.model_transform.quat(),
             self.model_transform.scale,
@@ -1558,6 +1675,7 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
             self.gaussian_transform.sh_deg,
             self.gaussian_transform.no_sh0,
         );
+
         match &self.selection {
             SceneCallbackSelection::Highlight(pod) => {
                 viewer
@@ -1581,10 +1699,10 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
             }
         }
 
-        if !self.measurement_visible_hit_pairs.is_empty() {
+        if !measurement_visible_hit_pairs.is_empty() {
             measurement_renderer.update_hit_pairs(
                 device,
-                &self.measurement_visible_hit_pairs,
+                measurement_visible_hit_pairs,
                 &viewer.lock().expect("viewer").world_buffers.camera_buffer,
             );
         }
@@ -1593,7 +1711,9 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
         {
             let viewer = viewer.lock().expect("viewer");
 
-            for model in viewer.models.iter() {
+            for key in self.model_render_keys.iter() {
+                let model = &viewer.models.get(key).expect("model");
+
                 viewer.preprocessor.preprocess(
                     egui_encoder,
                     &model.bind_groups.preprocessor,
@@ -1620,6 +1740,7 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
         let SceneResource::<G> {
             viewer,
             measurement_renderer,
+            measurement_visible_hit_pairs,
             query_toolset,
             query_texture_overlay,
             query_cursor,
@@ -1629,7 +1750,9 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
         {
             let viewer = viewer.lock().expect("viewer");
 
-            for model in viewer.models.iter() {
+            for key in self.model_render_keys.iter() {
+                let model = &viewer.models.get(key).expect("model");
+
                 viewer.renderer.render_with_pass(
                     render_pass,
                     &model.bind_groups.renderer,
@@ -1638,9 +1761,8 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
             }
         }
 
-        if !self.measurement_visible_hit_pairs.is_empty() {
-            measurement_renderer
-                .render(render_pass, self.measurement_visible_hit_pairs.len() as u32);
+        if !measurement_visible_hit_pairs.is_empty() {
+            measurement_renderer.render(render_pass, measurement_visible_hit_pairs.len() as u32);
         }
 
         if let Query::Selection { .. } = self.query {
@@ -1658,7 +1780,7 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
 impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
     /// Handle new query.
     ///
-    /// This is called when `query_resource` is `None`.
+    /// This is called when `query_resource` is [`None`].
     fn handle_new_query(
         &self,
         queue: &wgpu::Queue,
@@ -1748,7 +1870,7 @@ impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
                         viewer
                             .lock()
                             .expect("viewer")
-                            .download_query_results(device, queue, self.selected_model_index) // TODO: Use all models
+                            .download_query_results(device, queue, &self.selected_model_key) // TODO: Use all models
                             .await
                             .expect("query results")
                             .into_iter()
@@ -1892,16 +2014,26 @@ impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Query Result Count Download Encoder"),
         });
-        viewer.lock().expect("viewer").models[self.selected_model_index]
+        viewer
+            .lock()
+            .expect("viewer")
+            .models
+            .get(&self.selected_model_key)
+            .expect("model")
             .gaussian_buffers
             .query_result_count_buffer
             .prepare_download(&mut encoder);
         queue.submit(Some(encoder.finish()));
 
         let (tx, rx) = oneshot::channel();
-        let selected_model_index = self.selected_model_index;
+        let selected_model_key = self.selected_model_key.clone();
 
-        viewer.lock().expect("viewer").models[selected_model_index]
+        viewer
+            .lock()
+            .expect("viewer")
+            .models
+            .get(&selected_model_key)
+            .expect("model")
             .gaussian_buffers
             .query_result_count_buffer
             .download_buffer()
@@ -1910,14 +2042,24 @@ impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
                 let viewer = viewer.clone();
                 move |_| {
                     let count = bytemuck::pod_read_unaligned(
-                        &viewer.lock().expect("viewer").models[selected_model_index]
+                        &viewer
+                            .lock()
+                            .expect("viewer")
+                            .models
+                            .get(&selected_model_key)
+                            .expect("model")
                             .gaussian_buffers
                             .query_result_count_buffer
                             .download_buffer()
                             .slice(..)
                             .get_mapped_range(),
                     );
-                    viewer.lock().expect("viewer").models[selected_model_index]
+                    viewer
+                        .lock()
+                        .expect("viewer")
+                        .models
+                        .get(&selected_model_key)
+                        .expect("model")
                         .gaussian_buffers
                         .query_result_count_buffer
                         .download_buffer()
@@ -1958,7 +2100,12 @@ impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
                         // In WASM, the viewer is not Send nor Sync, but in native, it is.
                         #[allow(clippy::arc_with_non_send_sync)]
                         let download = Arc::new(
-                            viewer.lock().expect("viewer").models[self.selected_model_index]
+                            viewer
+                                .lock()
+                                .expect("viewer")
+                                .models
+                                .get(&self.selected_model_key)
+                                .expect("model")
                                 .gaussian_buffers
                                 .query_results_buffer
                                 .create_download_buffer(device, count),
@@ -1968,7 +2115,12 @@ impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("Query Results Download Encoder"),
                             });
-                        viewer.lock().expect("viewer").models[self.selected_model_index]
+                        viewer
+                            .lock()
+                            .expect("viewer")
+                            .models
+                            .get(&self.selected_model_key)
+                            .expect("model")
                             .gaussian_buffers
                             .query_results_buffer
                             .prepare_download(&mut encoder, &download);

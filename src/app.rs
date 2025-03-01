@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{BufRead, Cursor},
     ops::Range,
     sync::mpsc::{Receiver, Sender},
@@ -371,6 +372,23 @@ impl<T, E> Default for Loadable<T, E> {
     }
 }
 
+/// The scene commands.
+///
+/// This is for updating expensive scene data, scene will take this and update the resource.
+///
+/// For cheap data, they are updated in the scene tab by cloning the needed data from state.
+#[derive(Debug)]
+pub enum SceneCommand {
+    /// Add a new model.
+    AddModel(Result<GaussianSplattingModel, String>),
+
+    /// Remove a model.
+    RemoveModel(String),
+
+    /// Update the measurement hit.
+    UpdateMeasurementHit,
+}
+
 /// The Gaussian splatting model.
 #[derive(Debug)]
 pub struct GaussianSplatting {
@@ -378,16 +396,16 @@ pub struct GaussianSplatting {
     pub camera: Camera,
 
     /// The Gaussian models loaded.
-    pub models: Vec<GaussianSplattingModel>,
+    pub models: HashMap<String, GaussianSplattingModel>,
 
-    /// The receiver for additional models waiting to be loaded.
-    pub additional_models_rx: Receiver<Result<GaussianSplattingModel, String>>,
+    /// The sender for scene to handle scene related updates.
+    pub scene_tx: Sender<SceneCommand>,
 
-    /// The sender for additional models to be loaded.
-    pub additional_models_tx: Sender<Result<GaussianSplattingModel, String>>,
+    /// The receiver for scene to handle scene related updates.
+    pub scene_rx: Receiver<SceneCommand>,
 
     /// The currently selected Gaussian model.
-    pub selected_model_index: usize,
+    pub selected_model_key: String,
 
     /// The Gaussian transform.
     pub gaussian_transform: GaussianSplattingGaussianTransform,
@@ -420,7 +438,9 @@ impl GaussianSplatting {
 
         let model = GaussianSplattingModel::new(file_name, gs::Gaussians::read_ply(ply)?);
 
-        let (additional_models_tx, additional_models_rx) = std::sync::mpsc::channel();
+        let key = model.file_name.clone();
+
+        let (scene_tx, scene_rx) = std::sync::mpsc::channel();
 
         let camera = Camera::new_with_model(&model);
 
@@ -428,10 +448,10 @@ impl GaussianSplatting {
 
         Ok(Self {
             camera,
-            models: vec![model],
-            additional_models_rx,
-            additional_models_tx,
-            selected_model_index: 0,
+            models: HashMap::from([(key.clone(), model)]),
+            scene_tx,
+            scene_rx,
+            selected_model_key: key,
             gaussian_transform,
             action: None,
             measurement,
@@ -442,7 +462,9 @@ impl GaussianSplatting {
 
     /// Get the currently selected model.
     pub fn selected_model(&self) -> &GaussianSplattingModel {
-        &self.models[self.selected_model_index]
+        self.models
+            .get(&self.selected_model_key)
+            .expect("selected model")
     }
 }
 
@@ -511,9 +533,9 @@ impl GaussianSplattingModel {
         }
     }
 
-    /// Transform a point from local space to world space.
-    pub fn local_to_world(&self, point: Vec3) -> Vec3 {
-        self.transform.quat() * (point * self.transform.scale) + self.transform.pos
+    /// Get the center in world space.
+    pub fn world_center(&self) -> Vec3 {
+        self.transform.quat() * (self.center * self.transform.scale) + self.transform.pos
     }
 }
 
@@ -704,6 +726,14 @@ pub enum CameraControl {
 }
 
 impl CameraControl {
+    /// Get the position.
+    pub fn pos(&self) -> Vec3 {
+        match self {
+            Self::FirstPerson(control) => control.pos,
+            Self::Orbit(control) => control.pos,
+        }
+    }
+
     /// Get the position mutably.
     pub fn pos_mut(&mut self) -> &mut Vec3 {
         match self {
@@ -795,11 +825,6 @@ impl Measurement {
     /// Create a new measurement.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Get the visible hit pairs.
-    pub fn visible_hit_pairs(&self) -> impl Iterator<Item = &MeasurementHitPair> + '_ {
-        self.hit_pairs.iter().filter(|hit_pair| hit_pair.visible)
     }
 }
 

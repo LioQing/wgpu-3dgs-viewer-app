@@ -1,5 +1,6 @@
-use std::{io::Cursor, sync::mpsc};
+use std::{collections::HashMap, io::Cursor, sync::mpsc};
 
+use itertools::Itertools;
 use wgpu_3dgs_viewer as gs;
 
 use super::Tab;
@@ -27,16 +28,16 @@ impl Tab for Models {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut crate::app::State) {
-        let (models, selected_model_index, additional_models_tx, ui_builder) = match &mut state.gs {
+        let (models, selected_model_key, scene_tx, ui_builder) = match &mut state.gs {
             app::Loadable::Loaded(gs) => (
                 &mut gs.models,
-                &mut gs.selected_model_index,
-                &gs.additional_models_tx,
+                &mut gs.selected_model_key,
+                &gs.scene_tx,
                 egui::UiBuilder::new(),
             ),
             app::Loadable::Unloaded { .. } => (
-                &mut Vec::new(),
-                &mut 0,
+                &mut HashMap::new(),
+                &mut "".to_string(),
                 &mpsc::channel().0,
                 egui::UiBuilder::new().disabled(),
             ),
@@ -48,8 +49,8 @@ impl Tab for Models {
 
                 ui.separator();
 
-                if ui.button("Add Model").clicked() {
-                    let tx = additional_models_tx.clone();
+                if ui.button("➕ Add model").clicked() {
+                    let tx = scene_tx.clone();
                     let ctx = ui.ctx().clone();
                     let task = rfd::AsyncFileDialog::new()
                         .set_title("Open a PLY file")
@@ -62,7 +63,8 @@ impl Tab for Models {
                                 .map(|ply| app::GaussianSplattingModel::new(file.file_name(), ply))
                                 .map_err(|e| e.to_string());
 
-                            tx.send(models).expect("send gs");
+                            tx.send(app::SceneCommand::AddModel(models))
+                                .expect("send gs");
                             ctx.request_repaint();
                         }
                     });
@@ -75,6 +77,11 @@ impl Tab for Models {
                 .max(ui.spacing().interact_size.y);
 
             let available_height = ui.available_height();
+
+            let mut models_ordered = models
+                .iter_mut()
+                .sorted_by_key(|(k, _)| (*k).clone())
+                .collect::<Vec<_>>();
 
             egui_extras::TableBuilder::new(ui)
                 .striped(true)
@@ -100,18 +107,24 @@ impl Tab for Models {
                     });
                 })
                 .body(|body| {
-                    body.rows(text_height, models.len(), |mut row| {
+                    body.rows(text_height, models_ordered.len(), |mut row| {
                         let index = row.index();
-                        let model = &mut models[index];
+                        let (key, model) = &mut models_ordered[index];
 
-                        row.set_selected(index == *selected_model_index);
+                        row.set_selected(*key == selected_model_key);
 
                         row.col(|ui| {
-                            ui.label((index + 1).to_string());
+                            ui.add(egui::Label::new((index + 1).to_string()).selectable(false));
                         });
                         row.col(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(model.file_name.as_str());
+                                ui.add(
+                                    egui::Label::new(match model.file_name.as_str() {
+                                        "" => "[Unnamed]",
+                                        s => s,
+                                    })
+                                    .selectable(false),
+                                );
                             });
                         });
                         row.col(|ui| {
@@ -120,15 +133,17 @@ impl Tab for Models {
 
                         row.col(|ui| {
                             if ui.button("🗑").clicked() {
-                                models.remove(index);
+                                scene_tx
+                                    .send(app::SceneCommand::RemoveModel(key.clone()))
+                                    .unwrap();
                             }
                         });
 
                         if row.response().clicked() {
-                            *selected_model_index = index;
+                            *selected_model_key = (*key).clone();
                         }
                     })
-                })
+                });
         });
     }
 }

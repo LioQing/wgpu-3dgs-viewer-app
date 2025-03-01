@@ -21,13 +21,17 @@ impl Tab for Measurement {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
-        let (measurement, action, ui_builder) = match &mut state.gs {
-            app::Loadable::Loaded(gs) => {
-                (&mut gs.measurement, &mut gs.action, egui::UiBuilder::new())
-            }
+        let (measurement, action, scene_tx, ui_builder) = match &mut state.gs {
+            app::Loadable::Loaded(gs) => (
+                &mut gs.measurement,
+                &mut gs.action,
+                &gs.scene_tx,
+                egui::UiBuilder::new(),
+            ),
             app::Loadable::Unloaded { .. } => (
                 &mut app::Measurement::new(),
                 &mut None,
+                &mpsc::channel().0,
                 egui::UiBuilder::new().disabled(),
             ),
         };
@@ -73,10 +77,18 @@ impl Tab for Measurement {
 
             ui.separator();
 
+            let mut updated = false;
             let mut removed = Vec::new();
             for (index, hit_pair) in measurement.hit_pairs.iter_mut().enumerate() {
-                if !self.measurement(ui, index, action, hit_pair) {
-                    removed.push(index);
+                match self.measurement(ui, index, action, hit_pair) {
+                    MeasurementChanged::Removed => {
+                        removed.push(index);
+                        updated = true;
+                    }
+                    MeasurementChanged::Updated => {
+                        updated = true;
+                    }
+                    _ => {}
                 }
             }
 
@@ -91,9 +103,24 @@ impl Tab for Measurement {
                         "Measurement {}",
                         measurement.hit_pairs.len()
                     )));
+
+                updated = true;
+            }
+
+            if updated {
+                scene_tx
+                    .send(app::SceneCommand::UpdateMeasurementHit)
+                    .expect("send update measurement hit");
             }
         });
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeasurementChanged {
+    Unchanged,
+    Removed,
+    Updated,
 }
 
 impl Measurement {
@@ -106,19 +133,24 @@ impl Measurement {
         index: usize,
         action: &mut Option<app::Action>,
         hit_pair: &mut app::MeasurementHitPair,
-    ) -> bool {
+    ) -> MeasurementChanged {
         egui::CollapsingHeader::new(format!("{index}. {}", hit_pair.label))
             .id_salt(format!("measurement_{index}"))
             .show(ui, |ui| {
                 egui::Grid::new(format!("measurement_{index}_grid"))
                     .show(ui, |ui| {
-                        let mut alive = true;
+                        let mut changed = MeasurementChanged::Unchanged;
 
                         ui.label("Label");
-                        ui.add_sized(
-                            egui::vec2(150.0, ui.spacing().interact_size.y),
-                            egui::TextEdit::singleline(&mut hit_pair.label),
-                        );
+                        if ui
+                            .add_sized(
+                                egui::vec2(150.0, ui.spacing().interact_size.y),
+                                egui::TextEdit::singleline(&mut hit_pair.label),
+                            )
+                            .changed()
+                        {
+                            changed = MeasurementChanged::Updated;
+                        }
                         if hit_pair.label.is_empty() {
                             hit_pair.label = format!("Measurement {index}");
                         }
@@ -132,17 +164,26 @@ impl Measurement {
                             }
 
                             ui.scope_builder(ui_builder, |ui| {
-                                ui.color_edit_button_srgba(&mut hit_pair.color)
+                                if ui.color_edit_button_srgba(&mut hit_pair.color).changed() {
+                                    changed = MeasurementChanged::Updated;
+                                }
                             });
-                            ui.checkbox(&mut hit_pair.visible, "Visible");
+                            if ui.checkbox(&mut hit_pair.visible, "Visible").changed() {
+                                changed = MeasurementChanged::Updated;
+                            }
                         });
                         ui.end_row();
 
                         ui.label("Line Width");
-                        ui.add(
-                            egui::Slider::new(&mut hit_pair.line_width, 0.0..=5.0)
-                                .fixed_decimals(2),
-                        );
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut hit_pair.line_width, 0.0..=5.0)
+                                    .fixed_decimals(2),
+                            )
+                            .changed()
+                        {
+                            changed = MeasurementChanged::Updated;
+                        }
                         ui.end_row();
 
                         macro_rules! value {
@@ -151,11 +192,16 @@ impl Measurement {
                                     ui.spacing_mut().item_spacing.x /= 2.0;
 
                                     ui.label($axis);
-                                    ui.add(
-                                        egui::DragValue::new(&mut $value)
-                                            .speed(0.001)
-                                            .fixed_decimals(4),
-                                    );
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut $value)
+                                                .speed(0.001)
+                                                .fixed_decimals(4),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = MeasurementChanged::Updated;
+                                    }
                                 });
                             };
                         }
@@ -205,15 +251,15 @@ impl Measurement {
                         ui.end_row();
 
                         if ui.button("🗑 Remove").clicked() {
-                            alive = false;
+                            changed = MeasurementChanged::Removed;
                         }
                         ui.end_row();
 
-                        alive
+                        changed
                     })
                     .inner
             })
             .body_returned
-            .unwrap_or(true)
+            .unwrap_or(MeasurementChanged::Unchanged)
     }
 }
