@@ -59,19 +59,20 @@ fn main() {
                 Err(e) => {
                     loading_text.set_inner_html(
                         "\
-                        <p> The app has crashed. See the developer console for details. </p>\
                         <p> \
                             It is possible that your browser does not support WebGPU, \
                             check \
                             <a href=\
                                 \"https://github.com/gpuweb/gpuweb/wiki/Implementation-Status\"\
-                            >WebGPU Implementation Status<a>. \
+                            >\
+                                WebGPU Implementation Status\
+                            </a>\
                         </p>\
                         <p>\
                             You may try to use the native app, download from \
                             <a href=\"https://github.com/LioQing/wgpu-3dgs-viewer-app/releases\">\
-                                releases page\
-                            </a>. \
+                                Releases Page\
+                            </a>\
                         </p>\
                         ",
                     );
@@ -85,10 +86,6 @@ fn main() {
 fn wgpu_configuration() -> egui_wgpu::WgpuConfiguration {
     egui_wgpu::WgpuConfiguration {
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
-            instance_descriptor: wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::PRIMARY,
-                ..Default::default()
-            },
             power_preference: wgpu::PowerPreference::HighPerformance,
             device_descriptor: Arc::new(|adapter| wgpu::DeviceDescriptor {
                 label: Some("Device"),

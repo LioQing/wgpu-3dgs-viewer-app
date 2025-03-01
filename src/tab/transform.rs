@@ -23,7 +23,7 @@ impl Tab for Transform {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
         let (model, gaussian, ui_builder) = match &mut state.gs {
             app::Loadable::Loaded(gs) => (
-                &mut gs.model_transform,
+                &mut gs.models[gs.selected_model_index].transform,
                 &mut gs.gaussian_transform,
                 egui::UiBuilder::new(),
             ),

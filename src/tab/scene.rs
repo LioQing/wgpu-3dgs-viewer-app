@@ -1,24 +1,19 @@
 use std::{
     io::Cursor,
+    marker::PhantomData,
     sync::{mpsc, Arc, Mutex},
 };
 
 #[cfg(target_arch = "wasm32")]
 use eframe::wasm_bindgen::JsCast;
 
-use eframe::{
-    egui_wgpu,
-    wgpu::{self},
-};
+use eframe::{egui_wgpu, wgpu};
 use glam::*;
 use num_format::ToFormattedString;
 use strum::IntoEnumIterator;
 use wgpu_3dgs_viewer::{self as gs, QueryVariant, Texture};
 
-use crate::{
-    app::{self, Unloaded},
-    renderer, util,
-};
+use crate::{app, renderer, util};
 
 use super::Tab;
 
@@ -93,7 +88,7 @@ impl Tab for Scene {
                     Ok(None) => None,
                     Err(e) => Some(app::Loadable::error(e)),
                 },
-                true => match self.loaded(ui, gs) {
+                true => match self.loaded(ui, frame, gs) {
                     true => None,
                     false => Some(app::Loadable::unloaded()),
                 },
@@ -111,7 +106,7 @@ impl Scene {
     fn empty(
         &mut self,
         ui: &mut egui::Ui,
-        unloaded: &mut Unloaded<app::GaussianSplatting, String>,
+        unloaded: &mut app::Unloaded<app::GaussianSplatting, String>,
         compressions: &app::Compressions,
     ) {
         ui.vertical_centered(|ui| {
@@ -194,23 +189,106 @@ impl Scene {
     /// Create a loaded scene tab.
     ///
     /// Returns whether the scene is still loaded, false indicates the scene should be unloaded now.
-    fn loaded(&mut self, ui: &mut egui::Ui, gs: &mut app::GaussianSplatting) -> bool {
+    fn loaded(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        gs: &mut app::GaussianSplatting,
+    ) -> bool {
+        macro_rules! case {
+            ($sh:ident, $cov3d:ident) => {
+                app::Compressions {
+                    sh: app::ShCompression::$sh,
+                    cov3d: app::Cov3dCompression::$cov3d,
+                }
+            };
+        }
+
+        macro_rules! push_models {
+            ($sh:ident, $cov3d:ident, $frame:expr, $models:expr) => {
+                paste::paste! {
+                    $frame
+                        .wgpu_render_state()
+                        .expect("render state")
+                        .renderer
+                        .write()
+                        .callback_resources
+                        .get_mut::<SceneResource::<
+                            gs::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]
+                        >>()
+                        .expect("scene resource")
+                        .push_models(
+                            $frame.wgpu_render_state().expect("render state"),
+                            $models,
+                        )
+                }
+            };
+        }
+
+        let start_index = gs.models.len();
+        gs.additional_models_rx
+            .try_iter()
+            .inspect(|model| match model {
+                Ok(model) => log::debug!("Additional models loaded: {}", model.file_name),
+                Err(err) => log::error!("Error loading additional models: {err}"),
+            })
+            .filter_map(|model| model.ok())
+            .for_each(|model| {
+                gs.models.push(model);
+            });
+
+        if gs.models.len() > start_index {
+            let additional_models = gs.models[start_index..].iter().map(|m| &m.gaussians);
+
+            match &gs.compressions {
+                case!(Single, Single) => {
+                    push_models!(Single, Single, frame, additional_models);
+                }
+                case!(Single, Half) => {
+                    push_models!(Single, Half, frame, additional_models);
+                }
+                case!(Half, Single) => {
+                    push_models!(Half, Single, frame, additional_models);
+                }
+                case!(Half, Half) => {
+                    push_models!(Half, Half, frame, additional_models);
+                }
+                case!(Norm8, Single) => {
+                    push_models!(Norm8, Single, frame, additional_models);
+                }
+                case!(Norm8, Half) => {
+                    push_models!(Norm8, Half, frame, additional_models);
+                }
+                case!(Remove, Single) => {
+                    push_models!(None, Single, frame, additional_models);
+                }
+                case!(Remove, Half) => {
+                    push_models!(None, Half, frame, additional_models);
+                }
+            }
+        }
+
         let mut loaded = true;
 
         ui.horizontal(|ui| {
-            ui.label(format!(
+            let loaded_label = ui.label(format!(
                 "📦 Loaded: {}",
-                if gs.file_name.len() > 20 {
-                    format!("{}...", &gs.file_name[..20])
+                if gs.models.len() > 1 {
+                    format!("{} models", gs.models.len())
+                } else if gs.selected_model().file_name.len() > 20 {
+                    format!("{}...", &gs.selected_model().file_name[..20])
                 } else {
-                    gs.file_name.clone()
+                    gs.selected_model().file_name.clone()
                 }
-            ))
-            .on_hover_text(&gs.file_name);
+            ));
+
+            if gs.models.len() == 1 && gs.selected_model().file_name.len() > 20 {
+                loaded_label.on_hover_text(&gs.selected_model().file_name);
+            }
 
             ui.separator();
 
-            loaded &= !ui.button("🗑 Close model").clicked();
+            loaded &= !ui.button("🗑 Close models").clicked();
 
             ui.separator();
 
@@ -230,29 +308,66 @@ impl Scene {
 
             self.input.handle(ui, gs, &mut self.query, &rect, &response);
 
-            ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-                rect,
-                SceneCallback {
-                    measurement_visible_hit_pairs: gs
-                        .measurement
-                        .visible_hit_pairs()
-                        .cloned()
-                        .collect(),
-                    model_transform: gs.model_transform.clone(),
-                    gaussian_transform: gs.gaussian_transform.clone(),
-                    camera: gs.camera.control.clone(),
-                    viewer_size: Vec2::from_array(rect.size().into()),
-                    gaussian_count: gs.gaussians.gaussians.len(),
-                    query: self.query.clone(),
-                    selection: match &gs.selection.edit {
-                        Some(edit) => SceneCallbackSelection::Edit(edit.to_pod()),
-                        None => SceneCallbackSelection::Highlight(gs::SelectionHighlightPod::new(
-                            U8Vec4::from_array(gs.selection.highlight_color.to_array()).as_vec4()
-                                / 255.0,
-                        )),
-                    },
-                },
-            ));
+            macro_rules! painter {
+                ($ui:expr, $rect:expr, $sh:ident, $cov3d:ident, $gs:expr) => {
+                    paste::paste! {
+                        $ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                            $rect,
+                            SceneCallback::<gs::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]> {
+                                measurement_visible_hit_pairs: $gs
+                                    .measurement
+                                    .visible_hit_pairs()
+                                    .cloned()
+                                    .collect(),
+                                gaussian_transform: $gs.gaussian_transform.clone(),
+                                model_transform: $gs.selected_model().transform.clone(),
+                                selected_model_index: $gs.selected_model_index,
+                                camera: $gs.camera.control.clone(),
+                                viewer_size: Vec2::from_array($rect.size().into()),
+                                query: self.query.clone(),
+                                selection: match &$gs.selection.edit {
+                                    Some(edit) => SceneCallbackSelection::Edit(edit.to_pod()),
+                                    None => SceneCallbackSelection::Highlight(
+                                        gs::SelectionHighlightPod::new(
+                                            U8Vec4::from_array(
+                                                $gs.selection.highlight_color.to_array()
+                                            ).as_vec4() / 255.0,
+                                        ),
+                                    ),
+                                },
+                                phantom: PhantomData,
+                            },
+                        ))
+                    }
+                };
+            }
+
+            match &gs.compressions {
+                case!(Single, Single) => {
+                    painter!(ui, rect, Single, Single, gs);
+                }
+                case!(Single, Half) => {
+                    painter!(ui, rect, Single, Half, gs);
+                }
+                case!(Half, Single) => {
+                    painter!(ui, rect, Half, Single, gs);
+                }
+                case!(Half, Half) => {
+                    painter!(ui, rect, Half, Half, gs);
+                }
+                case!(Norm8, Single) => {
+                    painter!(ui, rect, Norm8, Single, gs);
+                }
+                case!(Norm8, Half) => {
+                    painter!(ui, rect, Norm8, Half, gs);
+                }
+                case!(Remove, Single) => {
+                    painter!(ui, rect, None, Single, gs);
+                }
+                case!(Remove, Half) => {
+                    painter!(ui, rect, None, Half, gs);
+                }
+            }
         });
 
         loaded
@@ -292,14 +407,16 @@ impl Scene {
                         ui.label("Position");
                         ui.label("N/A");
                         ui.label(util::human_readable_size(
-                            std::mem::size_of::<Vec3>() * gs.gaussians.gaussians.len(),
+                            std::mem::size_of::<Vec3>()
+                                * gs.selected_model().gaussians.gaussians.len(),
                         ));
                         ui.end_row();
 
                         ui.label("Color");
                         ui.label("N/A");
                         ui.label(util::human_readable_size(
-                            std::mem::size_of::<U8Vec4>() * gs.gaussians.gaussians.len(),
+                            std::mem::size_of::<U8Vec4>()
+                                * gs.selected_model().gaussians.gaussians.len(),
                         ));
                         ui.end_row();
 
@@ -328,7 +445,7 @@ impl Scene {
                                 app::ShCompression::Remove => std::mem::size_of::<
                                     <gs::GaussianShNoneConfig as gs::GaussianShConfig>::Field,
                                 >(),
-                            } * gs.gaussians.gaussians.len(),
+                            } * gs.selected_model().gaussians.gaussians.len(),
                         ));
                         ui.end_row();
 
@@ -350,12 +467,14 @@ impl Scene {
                         ui.label(util::human_readable_size(
                             match compressions.cov3d {
                                 app::Cov3dCompression::Single => std::mem::size_of::<
-                                    <gs::GaussianCov3dSingleConfig as gs::GaussianCov3dConfig>::Field,
+                                    <gs::GaussianCov3dSingleConfig as gs::GaussianCov3dConfig>
+                                        ::Field,
                                 >(),
                                 app::Cov3dCompression::Half => std::mem::size_of::<
-                                    <gs::GaussianCov3dHalfConfig as gs::GaussianCov3dConfig>::Field,
+                                    <gs::GaussianCov3dHalfConfig as gs::GaussianCov3dConfig>
+                                        ::Field,
                                 >(),
-                            } * gs.gaussians.gaussians.len(),
+                            } * gs.selected_model().gaussians.gaussians.len(),
                         ));
                         ui.end_row();
                     });
@@ -364,49 +483,86 @@ impl Scene {
 
                 ui.label(format!(
                     "Gaussian Count: {}",
-                    gs.gaussians.gaussians.len().to_formatted_string(&num_format::Locale::en)
+                    gs.selected_model()
+                        .gaussians
+                        .gaussians
+                        .len()
+                        .to_formatted_string(&num_format::Locale::en)
                 ));
 
                 ui.label(format!(
                     "Original Size: {}",
                     util::human_readable_size(
-                        gs.gaussians.gaussians.len() * std::mem::size_of::<gs::PlyGaussianPod>()
+                        gs.selected_model().gaussians.gaussians.len()
+                            * std::mem::size_of::<gs::PlyGaussianPod>()
                     )
                 ));
                 ui.label(format!(
                     "Compressed Size: {}",
                     util::human_readable_size(
-                        compressions.compressed_size(gs.gaussians.gaussians.len())
+                        compressions.compressed_size(gs.selected_model().gaussians.gaussians.len())
                     )
                 ));
                 ui.label("");
 
                 ui.horizontal(|ui| {
                     if ui.button("Confirm").clicked() {
-                        match SceneResource::new(
-                            frame.wgpu_render_state().expect("render state"),
-                            &gs.gaussians,
-                            compressions,
-                        ) {
-                            Ok(scene_resource) => {
-                                log::debug!("Scene resource initialized");
+                        macro_rules! case {
+                            ($sh:ident, $cov3d:ident) => {
+                                app::Compressions {
+                                    sh: app::ShCompression::$sh,
+                                    cov3d: app::Cov3dCompression::$cov3d,
+                                }
+                            };
+                        }
 
-                                frame
-                                    .wgpu_render_state()
-                                    .expect("render state")
-                                    .renderer
-                                    .write()
-                                    .callback_resources
-                                    .insert(scene_resource);
+                        macro_rules! new {
+                            ($sh:ident, $cov3d:ident, $frame:expr, $gs:expr) => {
+                                paste::paste! {
+                                    frame
+                                        .wgpu_render_state()
+                                        .expect("render state")
+                                        .renderer
+                                        .write()
+                                        .callback_resources
+                                        .insert(SceneResource::<
+                                            gs::[< GaussianPodWithSh $sh Cov3d $cov3d Configs >]
+                                        >::new(
+                                            $frame.wgpu_render_state().expect("render state"),
+                                            &$gs.selected_model().gaussians,
+                                        ))
+                                }
+                            };
+                        }
 
-                                return Ok(Some(true));
+                        match compressions {
+                            case!(Single, Single) => {
+                                new!(Single, Single, frame, gs);
                             }
-                            Err(e) => {
-                                log::debug!("Error initializing scene resource: {e}");
-
-                                return Err(e.to_string());
+                            case!(Single, Half) => {
+                                new!(Single, Half, frame, gs);
+                            }
+                            case!(Half, Single) => {
+                                new!(Half, Single, frame, gs);
+                            }
+                            case!(Half, Half) => {
+                                new!(Half, Half, frame, gs);
+                            }
+                            case!(Norm8, Single) => {
+                                new!(Norm8, Single, frame, gs);
+                            }
+                            case!(Norm8, Half) => {
+                                new!(Norm8, Half, frame, gs);
+                            }
+                            case!(Remove, Single) => {
+                                new!(None, Single, frame, gs);
+                            }
+                            case!(Remove, Half) => {
+                                new!(None, Half, frame, gs);
                             }
                         }
+
+                        return Ok(Some(true));
                     }
 
                     if ui.button("Cancel").clicked() {
@@ -414,7 +570,8 @@ impl Scene {
                     }
 
                     Ok(None)
-                }).inner
+                })
+                .inner
             })
             .inner
     }
@@ -469,6 +626,7 @@ impl SceneInput {
             self.control(
                 ui,
                 gs,
+                rect,
                 response,
                 #[cfg(target_arch = "wasm32")]
                 &web_result,
@@ -667,6 +825,7 @@ impl SceneInput {
         &mut self,
         ui: &mut egui::Ui,
         gs: &mut app::GaussianSplatting,
+        rect: &egui::Rect,
         response: &egui::Response,
         #[cfg(target_arch = "wasm32")] web_result: &SceneInputWebEventResult,
     ) {
@@ -685,7 +844,7 @@ impl SceneInput {
                 );
             }
             app::CameraControl::Orbit(_) => {
-                self.control_by_orbit(ui, gs, response);
+                self.control_by_orbit(ui, gs, rect, response);
             }
         }
     }
@@ -728,7 +887,7 @@ impl SceneInput {
             forward -= 1.0;
         }
 
-        movement += control.get_forward().with_y(0.0).normalize() * forward;
+        movement += control.get_forward().with_y(0.0).normalize_or_zero() * forward;
 
         let mut right = 0.0;
         if ui.ctx().input(|input| input.key_down(egui::Key::D)) {
@@ -738,7 +897,7 @@ impl SceneInput {
             right -= 1.0;
         }
 
-        movement += control.get_right().with_y(0.0).normalize() * right;
+        movement += control.get_right().with_y(0.0).normalize_or_zero() * right;
 
         movement = movement.normalize_or_zero() * gs.camera.speed;
 
@@ -771,7 +930,7 @@ impl SceneInput {
         #[cfg(target_arch = "wasm32")]
         let mouse_delta = web_result.mouse_move;
 
-        let mut rotation = -mouse_delta * 0.5;
+        let mut rotation = -mouse_delta * 0.01;
 
         if ui.ctx().input(|input| input.key_down(egui::Key::I)) {
             rotation.y += 1.0;
@@ -789,8 +948,8 @@ impl SceneInput {
 
         rotation *= gs.camera.sensitivity;
 
-        control.yaw_by(rotation.x * dt);
-        control.pitch_by(rotation.y * dt);
+        control.yaw_by(rotation.x);
+        control.pitch_by(rotation.y);
     }
 
     /// Handle the scene camera by orbit control.
@@ -798,6 +957,7 @@ impl SceneInput {
         &mut self,
         ui: &mut egui::Ui,
         gs: &mut app::GaussianSplatting,
+        rect: &egui::Rect,
         response: &egui::Response,
     ) {
         let control = match &mut gs.camera.control {
@@ -807,7 +967,6 @@ impl SceneInput {
                 return;
             }
         };
-        let dt = ui.ctx().input(|input| input.unstable_dt);
 
         // Hover cursor.
         if response.hovered() {
@@ -845,23 +1004,37 @@ impl SceneInput {
         // Orbit
         if response.dragged_by(egui::PointerButton::Primary) {
             let delta = Vec2::from_array(response.drag_delta().into());
-            let rotation = delta * gs.camera.sensitivity * dt;
+            let rotation = delta * gs.camera.sensitivity * 0.01;
             control.pos = control.target - orbit(control.pos, control.target, rotation);
         }
 
         // Look
         if response.dragged_by(egui::PointerButton::Middle) {
             let delta = Vec2::from_array(response.drag_delta().into());
-            let rotation = delta * gs.camera.sensitivity * dt * vec2(1.0, -1.0);
+            let rotation = delta * gs.camera.sensitivity * 0.01 * vec2(1.0, -1.0);
             control.target = control.pos - orbit(control.target, control.pos, rotation);
         }
 
         // Pan
         if response.dragged_by(egui::PointerButton::Secondary) {
             let delta = Vec2::from_array(response.drag_delta().into());
+
             let right = (control.pos - control.target).cross(Vec3::Y).normalize();
             let up = (control.target - control.pos).cross(right).normalize();
-            let movement = (right * delta.x + up * delta.y) * 0.5 * gs.camera.speed * dt;
+
+            let target_distance = (control.pos - control.target).length();
+
+            let view_height = 2.0 * target_distance * f32::tan(control.vertical_fov * 0.5);
+            let aspect_ratio = rect.width() / rect.height();
+            let view_width = view_height * aspect_ratio;
+
+            let scale_x = view_width / rect.width();
+            let scale_y = view_height / rect.height();
+
+            let world_delta = Vec2::new(delta.x * scale_x, delta.y * scale_y);
+
+            let movement = (right * world_delta.x + up * world_delta.y) * gs.camera.speed;
+
             control.pos += movement;
             control.target += movement;
         }
@@ -871,12 +1044,15 @@ impl SceneInput {
 
         let delta = ui.ctx().input(|input| input.smooth_scroll_delta.y);
         let diff = control.target - control.pos;
-        let zoom = diff.normalize() * delta * 0.5 * gs.camera.speed * dt;
+        let diff_length = diff.length();
 
-        if delta > 0.0 && diff.length_squared() <= zoom.length_squared() + MAX_ZOOM * MAX_ZOOM {
+        let distance_scale = diff_length * 0.001;
+        let zoom_amount = delta * gs.camera.speed * distance_scale;
+
+        if delta > 0.0 && diff_length <= zoom_amount + MAX_ZOOM {
             control.pos = control.target - diff.normalize() * MAX_ZOOM;
         } else {
-            control.pos += zoom;
+            control.pos += diff.normalize() * zoom_amount;
         }
     }
 }
@@ -1114,312 +1290,13 @@ enum SceneInputWebEvent {
     PointerLockChange(bool),
 }
 
-/// The viewer with different compression settings.
-#[derive(Debug)]
-enum Viewer {
-    ShSingleCov3dSingle(gs::Viewer<gs::GaussianPodWithShSingleCov3dSingleConfigs>),
-    ShSingleCov3dHalf(gs::Viewer<gs::GaussianPodWithShSingleCov3dHalfConfigs>),
-    ShHalfCov3dSingle(gs::Viewer<gs::GaussianPodWithShHalfCov3dSingleConfigs>),
-    ShHalfCov3dHalf(gs::Viewer<gs::GaussianPodWithShHalfCov3dHalfConfigs>),
-    ShNorm8Cov3dSingle(gs::Viewer<gs::GaussianPodWithShNorm8Cov3dSingleConfigs>),
-    ShNorm8Cov3dHalf(gs::Viewer<gs::GaussianPodWithShNorm8Cov3dHalfConfigs>),
-    ShRemoveCov3dSingle(gs::Viewer<gs::GaussianPodWithShNoneCov3dSingleConfigs>),
-    ShRemoveCov3dHalf(gs::Viewer<gs::GaussianPodWithShNoneCov3dHalfConfigs>),
-}
-
-macro_rules! viewer_call {
-    ($self:expr, ref $field:ident) => {
-        match $self {
-            Self::ShSingleCov3dSingle(viewer) => &viewer.$field,
-            Self::ShSingleCov3dHalf(viewer) => &viewer.$field,
-            Self::ShHalfCov3dSingle(viewer) => &viewer.$field,
-            Self::ShHalfCov3dHalf(viewer) => &viewer.$field,
-            Self::ShNorm8Cov3dSingle(viewer) => &viewer.$field,
-            Self::ShNorm8Cov3dHalf(viewer) => &viewer.$field,
-            Self::ShRemoveCov3dSingle(viewer) => &viewer.$field,
-            Self::ShRemoveCov3dHalf(viewer) => &viewer.$field,
-        }
-    };
-    ($self:expr, ref mut $field:ident) => {
-        match $self {
-            Self::ShSingleCov3dSingle(viewer) => &mut viewer.$field,
-            Self::ShSingleCov3dHalf(viewer) => &mut viewer.$field,
-            Self::ShHalfCov3dSingle(viewer) => &mut viewer.$field,
-            Self::ShHalfCov3dHalf(viewer) => &mut viewer.$field,
-            Self::ShNorm8Cov3dSingle(viewer) => &mut viewer.$field,
-            Self::ShNorm8Cov3dHalf(viewer) => &mut viewer.$field,
-            Self::ShRemoveCov3dSingle(viewer) => &mut viewer.$field,
-            Self::ShRemoveCov3dHalf(viewer) => &mut viewer.$field,
-        }
-    };
-    ($self:expr, $field:ident) => {
-        match $self {
-            Self::ShSingleCov3dSingle(viewer) => viewer.$field,
-            Self::ShSingleCov3dHalf(viewer) => viewer.$field,
-            Self::ShHalfCov3dSingle(viewer) => viewer.$field,
-            Self::ShHalfCov3dHalf(viewer) => viewer.$field,
-            Self::ShNorm8Cov3dSingle(viewer) => viewer.$field,
-            Self::ShNorm8Cov3dHalf(viewer) => viewer.$field,
-            Self::ShRemoveCov3dSingle(viewer) => viewer.$field,
-            Self::ShRemoveCov3dHalf(viewer) => viewer.$field,
-        }
-    };
-    ($self:expr, fn $fn:ident, $($args:expr),*) => {
-        match $self {
-            Self::ShSingleCov3dSingle(viewer) => viewer.$fn($($args),*),
-            Self::ShSingleCov3dHalf(viewer) => viewer.$fn($($args),*),
-            Self::ShHalfCov3dSingle(viewer) => viewer.$fn($($args),*),
-            Self::ShHalfCov3dHalf(viewer) => viewer.$fn($($args),*),
-            Self::ShNorm8Cov3dSingle(viewer) => viewer.$fn($($args),*),
-            Self::ShNorm8Cov3dHalf(viewer) => viewer.$fn($($args),*),
-            Self::ShRemoveCov3dSingle(viewer) => viewer.$fn($($args),*),
-            Self::ShRemoveCov3dHalf(viewer) => viewer.$fn($($args),*),
-        }
-    };
-    ($self:expr, async fn $fn:ident, $($args:expr),*) => {
-        match $self {
-            Self::ShSingleCov3dSingle(viewer) => viewer.$fn($($args),*).await,
-            Self::ShSingleCov3dHalf(viewer) => viewer.$fn($($args),*).await,
-            Self::ShHalfCov3dSingle(viewer) => viewer.$fn($($args),*).await,
-            Self::ShHalfCov3dHalf(viewer) => viewer.$fn($($args),*).await,
-            Self::ShNorm8Cov3dSingle(viewer) => viewer.$fn($($args),*).await,
-            Self::ShNorm8Cov3dHalf(viewer) => viewer.$fn($($args),*).await,
-            Self::ShRemoveCov3dSingle(viewer) => viewer.$fn($($args),*).await,
-            Self::ShRemoveCov3dHalf(viewer) => viewer.$fn($($args),*).await,
-        }
-    };
-}
-
-macro_rules! viewer_getters {
-    ($field:ident) => {
-        paste::paste! {
-            pub fn $field(&self) -> &gs::[< $field:camel >] {
-                viewer_call!(self, ref $field)
-            }
-
-            pub fn [< $field _mut >](&mut self) -> &mut gs::[< $field:camel >] {
-                viewer_call!(self, ref mut $field)
-            }
-        }
-    };
-}
-
-#[allow(dead_code)]
-impl Viewer {
-    /// Create a new viewer.
-    pub fn new(
-        device: &wgpu::Device,
-        texture_format: wgpu::TextureFormat,
-        texture_size: UVec2,
-        gaussians: &gs::Gaussians,
-        compressions: &app::Compressions,
-    ) -> Result<Self, gs::Error> {
-        macro_rules! case {
-            ($sh:ident, $cov3d:ident) => {
-                app::Compressions {
-                    sh: app::ShCompression::$sh,
-                    cov3d: app::Cov3dCompression::$cov3d,
-                }
-            };
-        }
-
-        macro_rules! new {
-            ($sh:ident, $cov3d:ident) => {
-                paste::paste! {
-                    Self::[<Sh $sh Cov3d $cov3d>](gs::Viewer::new(
-                        device, texture_format, texture_size, gaussians
-                    )?)
-                }
-            };
-        }
-
-        Ok(match compressions {
-            case!(Single, Single) => new!(Single, Single),
-            case!(Single, Half) => new!(Single, Half),
-            case!(Half, Single) => new!(Half, Single),
-            case!(Half, Half) => new!(Half, Half),
-            case!(Norm8, Single) => new!(Norm8, Single),
-            case!(Norm8, Half) => new!(Norm8, Half),
-            case!(Remove, Single) => new!(Remove, Single),
-            case!(Remove, Half) => new!(Remove, Half),
-        })
-    }
-
-    viewer_getters!(camera_buffer);
-    viewer_getters!(model_transform_buffer);
-    viewer_getters!(gaussian_transform_buffer);
-    viewer_getters!(indirect_args_buffer);
-    viewer_getters!(radix_sort_indirect_args_buffer);
-    viewer_getters!(indirect_indices_buffer);
-    viewer_getters!(gaussians_depth_buffer);
-    viewer_getters!(query_buffer);
-    viewer_getters!(query_result_count_buffer);
-    viewer_getters!(query_results_buffer);
-    viewer_getters!(postprocess_indirect_args_buffer);
-    viewer_getters!(selection_highlight_buffer);
-    viewer_getters!(selection_buffer);
-    viewer_getters!(gaussians_edit_buffer);
-    viewer_getters!(selection_edit_buffer);
-    viewer_getters!(query_texture);
-
-    viewer_getters!(preprocessor);
-    viewer_getters!(radix_sorter);
-    viewer_getters!(renderer);
-    viewer_getters!(postprocessor);
-
-    /// Update the camera.
-    pub fn update_camera(
-        &mut self,
-        queue: &wgpu::Queue,
-        camera: &impl gs::CameraTrait,
-        texture_size: UVec2,
-    ) {
-        viewer_call!(self, fn update_camera, queue, camera, texture_size);
-    }
-
-    /// Update the camera with [`gs::CameraPod`].
-    pub fn update_camera_with_pod(&mut self, queue: &wgpu::Queue, camera: &gs::CameraPod) {
-        viewer_call!(self, fn update_camera_with_pod, queue, camera);
-    }
-
-    /// Update the query.
-    pub fn update_query(&mut self, queue: &wgpu::Queue, query: &gs::QueryPod) {
-        viewer_call!(self, fn update_query, queue, query);
-    }
-
-    /// Update the model transform.
-    pub fn update_model_transform(
-        &mut self,
-        queue: &wgpu::Queue,
-        pos: Vec3,
-        quat: Quat,
-        scale: Vec3,
-    ) {
-        viewer_call!(self, fn update_model_transform, queue, pos, quat, scale);
-    }
-
-    /// Update the model transform with [`gs::ModelTransformPod`].
-    pub fn update_model_transform_with_pod(
-        &mut self,
-        queue: &wgpu::Queue,
-        model: &gs::ModelTransformPod,
-    ) {
-        viewer_call!(self, fn update_model_transform_with_pod, queue, model);
-    }
-
-    /// Update the Gaussian transform.
-    pub fn update_gaussian_transform(
-        &mut self,
-        queue: &wgpu::Queue,
-        size: f32,
-        display_mode: gs::GaussianDisplayMode,
-        sh_deg: gs::GaussianShDegree,
-        no_sh0: bool,
-    ) {
-        viewer_call!(
-            self,
-            fn update_gaussian_transform,
-            queue,
-            size,
-            display_mode,
-            sh_deg,
-            no_sh0
-        );
-    }
-
-    /// Update the Gaussian transform with [`gs::GaussianTransformPod`].
-    pub fn update_gaussian_transform_with_pod(
-        &mut self,
-        queue: &wgpu::Queue,
-        gaussian: &gs::GaussianTransformPod,
-    ) {
-        viewer_call!(self, fn update_gaussian_transform_with_pod, queue, gaussian);
-    }
-
-    /// Update the selection highlight.
-    pub fn update_selection_highlight(&mut self, queue: &wgpu::Queue, color: Vec4) {
-        viewer_call!(self, fn update_selection_highlight, queue, color);
-    }
-
-    /// Update the selection highlight with [`gs::SelectionHighlightPod`].
-    pub fn update_selection_highlight_with_pod(
-        &mut self,
-        queue: &wgpu::Queue,
-        highlight: &gs::SelectionHighlightPod,
-    ) {
-        viewer_call!(self, fn update_selection_highlight_with_pod, queue, highlight);
-    }
-
-    /// Update the selection edit.
-    ///
-    /// Set [`gs::GaussianEditFlag::ENABLED`] to apply the edits on the selected Gaussians.
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_selection_edit(
-        &mut self,
-        queue: &wgpu::Queue,
-        flag: gs::GaussianEditFlag,
-        hsv: Vec3,
-        contrast: f32,
-        exposure: f32,
-        gamma: f32,
-        alpha: f32,
-    ) {
-        viewer_call!(
-            self,
-            fn update_selection_edit,
-            queue,
-            flag,
-            hsv,
-            contrast,
-            exposure,
-            gamma,
-            alpha
-        );
-    }
-
-    /// Update the selection edit with [`gs::GaussianEditPod`].
-    pub fn update_selection_edit_with_pod(
-        &mut self,
-        queue: &wgpu::Queue,
-        edit: &gs::GaussianEditPod,
-    ) {
-        viewer_call!(self, fn update_selection_edit_with_pod, queue, edit);
-    }
-
-    /// Update the query texture size.
-    ///
-    /// This requires the `query-texture` feature.
-    pub fn update_query_texture_size(&mut self, device: &wgpu::Device, size: UVec2) {
-        viewer_call!(self, fn update_query_texture_size, device, size);
-    }
-
-    /// Render the viewer.
-    pub fn render(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        texture_view: &wgpu::TextureView,
-        gaussian_count: u32,
-    ) {
-        viewer_call!(self, fn render, encoder, texture_view, gaussian_count);
-    }
-
-    /// Download the query results from the GPU.
-    pub async fn download_query_results(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Result<Vec<gs::QueryResultPod>, gs::Error> {
-        viewer_call!(self, async fn download_query_results, device, queue)
-    }
-}
-
 /// The scene resource.
 ///
 /// This is for the [`SceneCallback`].
 #[derive(Debug)]
-struct SceneResource {
+struct SceneResource<G: gs::GaussianPod> {
     /// The viewer.
-    viewer: Arc<Mutex<Viewer>>,
+    viewer: Arc<Mutex<gs::MultiModelViewer<G>>>,
 
     /// The measurement renderer.
     measurement_renderer: renderer::Measurement,
@@ -1440,32 +1317,28 @@ struct SceneResource {
     query_cursor: gs::QueryCursor,
 }
 
-impl SceneResource {
+impl<G: gs::GaussianPod> SceneResource<G> {
     /// Create a new scene resource.
-    fn new(
-        render_state: &egui_wgpu::RenderState,
-        gaussians: &gs::Gaussians,
-        compressions: &app::Compressions,
-    ) -> Result<Self, String> {
+    fn new(render_state: &egui_wgpu::RenderState, gaussians: &gs::Gaussians) -> Self {
         log::debug!("Creating viewer");
         // In WASM, the viewer is not Send nor Sync, but in native, it is.
         #[allow(clippy::arc_with_non_send_sync)]
-        let viewer = Arc::new(Mutex::new(
-            Viewer::new(
-                &render_state.device,
-                render_state.target_format,
-                uvec2(1, 1),
-                gaussians,
-                compressions,
-            )
-            .map_err(|e| e.to_string())?,
-        ));
+        let viewer = Arc::new(Mutex::new(gs::MultiModelViewer::new(
+            &render_state.device,
+            render_state.target_format,
+            uvec2(1, 1),
+        )));
+
+        viewer
+            .lock()
+            .expect("viewer")
+            .push_model(&render_state.device, gaussians);
 
         log::debug!("Creating measurement renderer");
         let measurement_renderer = renderer::Measurement::new(
             &render_state.device,
             render_state.target_format,
-            viewer.lock().expect("viewer").camera_buffer(),
+            &viewer.lock().expect("viewer").world_buffers.camera_buffer,
         );
 
         log::debug!("Creating query resource");
@@ -1477,8 +1350,8 @@ impl SceneResource {
 
             gs::QueryToolset::new(
                 &render_state.device,
-                viewer.query_texture(),
-                viewer.camera_buffer(),
+                &viewer.world_buffers.query_texture,
+                &viewer.world_buffers.camera_buffer,
             )
         };
 
@@ -1486,26 +1359,38 @@ impl SceneResource {
         let query_texture_overlay = gs::QueryTextureOverlay::new(
             &render_state.device,
             render_state.target_format,
-            viewer.lock().expect("viewer").query_texture(),
+            &viewer.lock().expect("viewer").world_buffers.query_texture,
         );
 
         log::debug!("Creating query cursor");
         let query_cursor = gs::QueryCursor::new(
             &render_state.device,
             render_state.target_format,
-            viewer.lock().expect("viewer").camera_buffer(),
+            &viewer.lock().expect("viewer").world_buffers.camera_buffer,
         );
 
         log::info!("Scene loaded");
 
-        Ok(Self {
+        Self {
             viewer,
             measurement_renderer,
             query_resource,
             query_toolset,
             query_texture_overlay,
             query_cursor,
-        })
+        }
+    }
+
+    /// Push an iterator of new models.
+    fn push_models<'a>(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        models: impl IntoIterator<Item = &'a gs::Gaussians>,
+    ) {
+        self.viewer
+            .lock()
+            .expect("viewer")
+            .push_models(&render_state.device, models);
     }
 }
 
@@ -1552,7 +1437,7 @@ pub enum SceneCallbackSelection {
 }
 
 /// The scene callback.
-struct SceneCallback {
+struct SceneCallback<G: gs::GaussianPod + Send + Sync> {
     /// The highlighted measurement hit pair.
     measurement_visible_hit_pairs: Vec<app::MeasurementHitPair>,
 
@@ -1562,23 +1447,26 @@ struct SceneCallback {
     /// The Gaussian splatting model transform.
     model_transform: app::GaussianSplattingModelTransform,
 
+    /// The currently selected model.
+    selected_model_index: usize,
+
     /// The camera.
     camera: app::CameraControl,
 
     /// The viewer size.
     viewer_size: Vec2,
 
-    /// The Gaussian count.
-    gaussian_count: usize,
-
     /// The query.
     query: Query,
 
     /// The selection highlight or edit.
     selection: SceneCallbackSelection,
+
+    /// The phantom data.
+    phantom: PhantomData<G>,
 }
 
-impl egui_wgpu::CallbackTrait for SceneCallback {
+impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallback<G> {
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -1603,11 +1491,17 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Postprocess Encoder"),
             });
-            viewer.postprocessor().postprocess(
-                &mut encoder,
-                self.gaussian_count as u32,
-                viewer.postprocess_indirect_args_buffer(),
-            );
+
+            for model in viewer.models.iter() {
+                viewer.postprocessor.postprocess(
+                    &mut encoder,
+                    &model.bind_groups.postprocessor.0,
+                    &model.bind_groups.postprocessor.1,
+                    model.gaussian_buffers.gaussians_buffer.len() as u32,
+                    &model.gaussian_buffers.postprocess_indirect_args_buffer,
+                );
+            }
+
             queue.submit(Some(encoder.finish()));
             device.poll(wgpu::Maintain::Wait);
         }
@@ -1616,7 +1510,8 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         let wgpu::Extent3d { width, height, .. } = viewer
             .lock()
             .expect("viewer")
-            .query_texture()
+            .world_buffers
+            .query_texture
             .texture()
             .size();
         let texture_size = uvec2(width, height);
@@ -1626,8 +1521,10 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
                 .lock()
                 .expect("viewer")
                 .update_query_texture_size(device, self.viewer_size.as_uvec2());
-            query_texture_overlay
-                .update_bind_group(device, viewer.lock().expect("viewer").query_texture());
+            query_texture_overlay.update_bind_group(
+                device,
+                &viewer.lock().expect("viewer").world_buffers.query_texture,
+            );
         }
 
         // Handle query.
@@ -1649,6 +1546,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         );
         viewer.lock().expect("viewer").update_model_transform(
             queue,
+            self.selected_model_index,
             self.model_transform.pos,
             self.model_transform.quat(),
             self.model_transform.scale,
@@ -1687,7 +1585,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
             measurement_renderer.update_hit_pairs(
                 device,
                 &self.measurement_visible_hit_pairs,
-                viewer.lock().expect("viewer").camera_buffer(),
+                &viewer.lock().expect("viewer").world_buffers.camera_buffer,
             );
         }
 
@@ -1695,13 +1593,19 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         {
             let viewer = viewer.lock().expect("viewer");
 
-            viewer
-                .preprocessor()
-                .preprocess(egui_encoder, self.gaussian_count as u32);
+            for model in viewer.models.iter() {
+                viewer.preprocessor.preprocess(
+                    egui_encoder,
+                    &model.bind_groups.preprocessor,
+                    model.gaussian_buffers.gaussians_buffer.len() as u32,
+                );
 
-            viewer
-                .radix_sorter()
-                .sort(egui_encoder, viewer.radix_sort_indirect_args_buffer());
+                viewer.radix_sorter.sort(
+                    egui_encoder,
+                    &model.bind_groups.radix_sorter,
+                    &model.gaussian_buffers.radix_sort_indirect_args_buffer,
+                );
+            }
         }
 
         vec![]
@@ -1713,7 +1617,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let SceneResource {
+        let SceneResource::<G> {
             viewer,
             measurement_renderer,
             query_toolset,
@@ -1725,9 +1629,13 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
         {
             let viewer = viewer.lock().expect("viewer");
 
-            viewer
-                .renderer()
-                .render_with_pass(render_pass, viewer.indirect_args_buffer());
+            for model in viewer.models.iter() {
+                viewer.renderer.render_with_pass(
+                    render_pass,
+                    &model.bind_groups.renderer,
+                    &model.gaussian_buffers.indirect_args_buffer,
+                );
+            }
         }
 
         if !self.measurement_visible_hit_pairs.is_empty() {
@@ -1747,7 +1655,7 @@ impl egui_wgpu::CallbackTrait for SceneCallback {
     }
 }
 
-impl SceneCallback {
+impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
     /// Handle new query.
     ///
     /// This is called when `query_resource` is `None`.
@@ -1755,7 +1663,7 @@ impl SceneCallback {
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        viewer: &mut Arc<Mutex<Viewer>>,
+        viewer: &mut Arc<Mutex<gs::MultiModelViewer<G>>>,
         query_resource: &mut Option<SceneQueryResource>,
         query_toolset: &mut gs::QueryToolset,
         query_cursor: &mut gs::QueryCursor,
@@ -1808,14 +1716,14 @@ impl SceneCallback {
             query_toolset.render(
                 queue,
                 encoder,
-                viewer.lock().expect("viewer").query_texture(),
+                &viewer.lock().expect("viewer").world_buffers.query_texture,
             );
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl SceneCallback {
+impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
     /// Handle query.
     #[allow(clippy::too_many_arguments)]
     fn query(
@@ -1823,7 +1731,7 @@ impl SceneCallback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        viewer: &mut Arc<Mutex<Viewer>>,
+        viewer: &mut Arc<Mutex<gs::MultiModelViewer<G>>>,
         query_resource: &mut Option<SceneQueryResource>,
         query_toolset: &mut gs::QueryToolset,
         query_cursor: &mut gs::QueryCursor,
@@ -1840,7 +1748,7 @@ impl SceneCallback {
                         viewer
                             .lock()
                             .expect("viewer")
-                            .download_query_results(device, queue)
+                            .download_query_results(device, queue, self.selected_model_index) // TODO: Use all models
                             .await
                             .expect("query results")
                             .into_iter()
@@ -1903,7 +1811,7 @@ enum SceneCallbackQueryResult {
 }
 
 #[cfg(target_arch = "wasm32")]
-impl SceneCallback {
+impl<G: gs::GaussianPod + Send + Sync> SceneCallback<G> {
     /// Handle query.
     #[allow(clippy::too_many_arguments)]
     fn query(
@@ -1911,7 +1819,7 @@ impl SceneCallback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        viewer: &mut Arc<Mutex<Viewer>>,
+        viewer: &mut Arc<Mutex<gs::MultiModelViewer<G>>>,
         query_resource: &mut Option<SceneQueryResource>,
         query_toolset: &mut gs::QueryToolset,
         query_cursor: &mut gs::QueryCursor,
@@ -1978,43 +1886,40 @@ impl SceneCallback {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        viewer: &mut Arc<Mutex<Viewer>>,
+        viewer: &mut Arc<Mutex<gs::MultiModelViewer<G>>>,
         query: &mut Query,
     ) -> SceneCallbackQueryResult {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Query Result Count Download Encoder"),
         });
-        viewer
-            .lock()
-            .expect("viewer")
-            .query_result_count_buffer()
+        viewer.lock().expect("viewer").models[self.selected_model_index]
+            .gaussian_buffers
+            .query_result_count_buffer
             .prepare_download(&mut encoder);
         queue.submit(Some(encoder.finish()));
 
         let (tx, rx) = oneshot::channel();
+        let selected_model_index = self.selected_model_index;
 
-        viewer
-            .lock()
-            .expect("viewer")
-            .query_result_count_buffer()
+        viewer.lock().expect("viewer").models[selected_model_index]
+            .gaussian_buffers
+            .query_result_count_buffer
             .download_buffer()
             .slice(..)
             .map_async(wgpu::MapMode::Read, {
                 let viewer = viewer.clone();
                 move |_| {
                     let count = bytemuck::pod_read_unaligned(
-                        &viewer
-                            .lock()
-                            .expect("viewer")
-                            .query_result_count_buffer()
+                        &viewer.lock().expect("viewer").models[selected_model_index]
+                            .gaussian_buffers
+                            .query_result_count_buffer
                             .download_buffer()
                             .slice(..)
                             .get_mapped_range(),
                     );
-                    viewer
-                        .lock()
-                        .expect("viewer")
-                        .query_result_count_buffer()
+                    viewer.lock().expect("viewer").models[selected_model_index]
+                        .gaussian_buffers
+                        .query_result_count_buffer
                         .download_buffer()
                         .unmap();
 
@@ -2042,7 +1947,7 @@ impl SceneCallback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         rx: &mut oneshot::Receiver<u32>,
-        viewer: &mut Arc<Mutex<Viewer>>,
+        viewer: &mut Arc<Mutex<gs::MultiModelViewer<G>>>,
         query: &mut Query,
     ) -> SceneCallbackQueryResult {
         match rx.try_recv() {
@@ -2053,10 +1958,9 @@ impl SceneCallback {
                         // In WASM, the viewer is not Send nor Sync, but in native, it is.
                         #[allow(clippy::arc_with_non_send_sync)]
                         let download = Arc::new(
-                            viewer
-                                .lock()
-                                .expect("viewer")
-                                .query_results_buffer()
+                            viewer.lock().expect("viewer").models[self.selected_model_index]
+                                .gaussian_buffers
+                                .query_results_buffer
                                 .create_download_buffer(device, count),
                         );
 
@@ -2064,10 +1968,9 @@ impl SceneCallback {
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("Query Results Download Encoder"),
                             });
-                        viewer
-                            .lock()
-                            .expect("viewer")
-                            .query_results_buffer()
+                        viewer.lock().expect("viewer").models[self.selected_model_index]
+                            .gaussian_buffers
+                            .query_results_buffer
                             .prepare_download(&mut encoder, &download);
                         queue.submit(Some(encoder.finish()));
 
@@ -2107,7 +2010,7 @@ impl SceneCallback {
         _device: &wgpu::Device,
         _queue: &wgpu::Queue,
         rx: &mut oneshot::Receiver<Vec<gs::QueryHitResultPod>>,
-        _viewer: &mut Arc<Mutex<Viewer>>,
+        _viewer: &mut Arc<Mutex<gs::MultiModelViewer<G>>>,
         query: &mut Query,
     ) -> SceneCallbackQueryResult {
         if let Ok(mut results) = rx.try_recv() {

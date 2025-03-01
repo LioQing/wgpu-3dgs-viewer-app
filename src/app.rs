@@ -89,7 +89,7 @@ impl App {
                 }
 
                 if ui
-                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Close model"))
+                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Close models"))
                     .clicked()
                 {
                     self.state.gs = Loadable::unloaded();
@@ -185,23 +185,28 @@ impl App {
                     egui::Hyperlink::from_label_and_url("[wgpu]", "https://wgpu.rs")
                         .open_in_new_tab(true),
                 );
-                ui.label(", ");
+                ui.label(" and ");
                 ui.add(
                     egui::Hyperlink::from_label_and_url("[egui]", "https://github.com/emilk/egui")
                         .open_in_new_tab(true),
                 );
-                ui.label(" and ");
+                ui.label(". ");
+            });
+
+            ui.horizontal_wrapped(|ui| {
                 ui.add(
                     egui::Hyperlink::from_label_and_url(
-                        "[eframe]",
-                        "https://github.com/emilk/egui/tree/master/crates/eframe",
+                        "[Source Code]",
+                        "https://github.com/lioqing/wgpu-3dgs-viewer-app",
                     )
                     .open_in_new_tab(true),
                 );
-                ui.label(". ");
-                ui.hyperlink_to(
-                    "[Source Code]",
-                    "https://github.com/lioqing/wgpu-3dgs-viewer-app",
+                ui.add(
+                    egui::Hyperlink::from_label_and_url(
+                        "[Native App]",
+                        "https://github.com/LioQing/wgpu-3dgs-viewer-app/releases",
+                    )
+                    .open_in_new_tab(true),
                 );
             });
         });
@@ -369,17 +374,20 @@ impl<T, E> Default for Loadable<T, E> {
 /// The Gaussian splatting model.
 #[derive(Debug)]
 pub struct GaussianSplatting {
-    /// The file name of the opened Gaussian splatting model.
-    pub file_name: String,
-
     /// The camera to view the model.
     pub camera: Camera,
 
-    /// The Gaussians parsed from the model.
-    pub gaussians: gs::Gaussians,
+    /// The Gaussian models loaded.
+    pub models: Vec<GaussianSplattingModel>,
 
-    /// The model transform.
-    pub model_transform: GaussianSplattingModelTransform,
+    /// The receiver for additional models waiting to be loaded.
+    pub additional_models_rx: Receiver<Result<GaussianSplattingModel, String>>,
+
+    /// The sender for additional models to be loaded.
+    pub additional_models_tx: Sender<Result<GaussianSplattingModel, String>>,
+
+    /// The currently selected Gaussian model.
+    pub selected_model_index: usize,
 
     /// The Gaussian transform.
     pub gaussian_transform: GaussianSplattingGaussianTransform,
@@ -410,25 +418,31 @@ impl GaussianSplatting {
 
         let gaussian_transform = GaussianSplattingGaussianTransform::new();
 
-        let model_transform = GaussianSplattingModelTransform::new();
+        let model = GaussianSplattingModel::new(file_name, gs::Gaussians::read_ply(ply)?);
 
-        let gaussians = gs::Gaussians::read_ply(ply)?;
+        let (additional_models_tx, additional_models_rx) = std::sync::mpsc::channel();
 
-        let camera = Camera::new(&gaussians, &model_transform);
+        let camera = Camera::new_with_model(&model);
 
         log::info!("Gaussian splatting model loaded");
 
         Ok(Self {
-            file_name,
             camera,
-            gaussians,
-            model_transform,
+            models: vec![model],
+            additional_models_rx,
+            additional_models_tx,
+            selected_model_index: 0,
             gaussian_transform,
             action: None,
             measurement,
             selection,
             compressions,
         })
+    }
+
+    /// Get the currently selected model.
+    pub fn selected_model(&self) -> &GaussianSplattingModel {
+        &self.models[self.selected_model_index]
     }
 }
 
@@ -454,6 +468,53 @@ pub enum Action {
 
     /// Selecting.
     Selection,
+}
+
+/// The Gaussian splatting model.
+#[derive(Debug)]
+pub struct GaussianSplattingModel {
+    /// The file name.
+    pub file_name: String,
+
+    /// The Gaussians.
+    pub gaussians: gs::Gaussians,
+
+    /// The transform.
+    pub transform: GaussianSplattingModelTransform,
+
+    /// The center of the bounding box.
+    pub center: Vec3,
+
+    /// Whether the model is visible.
+    pub visible: bool,
+}
+
+impl GaussianSplattingModel {
+    /// Create a new Gaussian splatting model.
+    pub fn new(file_name: String, gaussians: gs::Gaussians) -> Self {
+        let (min, max) = gaussians
+            .gaussians
+            .iter()
+            .map(|g| g.pos)
+            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(min, max), pos| {
+                (min.min(pos), max.max(pos))
+            });
+
+        let center = (min + max) / 2.0;
+
+        Self {
+            file_name,
+            gaussians,
+            transform: GaussianSplattingModelTransform::new(),
+            center,
+            visible: true,
+        }
+    }
+
+    /// Transform a point from local space to world space.
+    pub fn local_to_world(&self, point: Vec3) -> Vec3 {
+        self.transform.quat() * (point * self.transform.scale) + self.transform.pos
+    }
 }
 
 /// The Gaussian splatting model transform.
@@ -545,22 +606,35 @@ pub struct Camera {
 
 impl Camera {
     /// Create a new camera.
-    pub fn new(
-        gaussians: &gs::Gaussians,
-        model_transform: &GaussianSplattingModelTransform,
-    ) -> Self {
-        let target = gaussians
+    pub fn new() -> Self {
+        Self {
+            control: CameraControl::Orbit(CameraOrbitControl::new(
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.1..1e4,
+                60f32.to_radians(),
+            )),
+            speed: 1.0,
+            sensitivity: 0.5,
+        }
+    }
+
+    /// Create a new camera with an initial position based on a [`GaussianSplattingModel`].
+    pub fn new_with_model(model: &GaussianSplattingModel) -> Self {
+        let target = model
+            .gaussians
             .gaussians
             .iter()
-            .map(|g| model_transform.quat() * g.pos)
+            .map(|g| model.transform.quat() * g.pos)
             .sum::<Vec3>()
-            / gaussians.gaussians.len() as f32;
+            / model.gaussians.gaussians.len() as f32;
         let pos = target
             + Vec3::Z
-                * gaussians
+                * model
+                    .gaussians
                     .gaussians
                     .iter()
-                    .map(|g| (model_transform.quat() * g.pos).z - target.z)
+                    .map(|g| (model.transform.quat() * g.pos).z - target.z)
                     .fold(f32::INFINITY, |a, b| a.min(b));
         let control = CameraOrbitControl::new(target, pos, 0.1..1e4, 60f32.to_radians());
 
@@ -574,16 +648,7 @@ impl Camera {
 
 impl Default for Camera {
     fn default() -> Self {
-        Self {
-            control: CameraControl::Orbit(CameraOrbitControl::new(
-                Vec3::ZERO,
-                Vec3::ZERO,
-                0.1..1e4,
-                60f32.to_radians(),
-            )),
-            speed: 1.0,
-            sensitivity: 0.5,
-        }
+        Self::new()
     }
 }
 
