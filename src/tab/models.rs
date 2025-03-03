@@ -83,6 +83,42 @@ impl Tab for Models {
                 .sorted_by_key(|(k, _)| (*k).clone())
                 .collect::<Vec<_>>();
 
+            let hovered = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
+
+            match ui
+                .ctx()
+                .input(|input| match &input.raw.dropped_files.as_slice() {
+                    [_x, _xs, ..] => Some(Err("only one file is allowed")),
+                    [file] => Some(Ok(match cfg!(target_arch = "wasm32") {
+                        true => gs::Gaussians::read_ply(&mut Cursor::new(
+                            file.bytes.as_ref().expect("file bytes").to_vec(),
+                        ))
+                        .map(|ply| app::GaussianSplattingModel::new(file.name.clone(), ply))
+                        .map_err(|e| e.to_string()),
+                        false => std::fs::read(file.path.as_ref().expect("file path").clone())
+                            .map(Cursor::new)
+                            .map_err(|e| e.to_string())
+                            .and_then(|mut reader| {
+                                gs::Gaussians::read_ply(&mut reader).map_err(|e| e.to_string())
+                            })
+                            .map(|ply| app::GaussianSplattingModel::new(file.name.clone(), ply)),
+                    })),
+                    _ => None,
+                }) {
+                Some(Ok(result)) => {
+                    scene_tx
+                        .send(app::SceneCommand::AddModel(result))
+                        .expect("send gs");
+                    ui.ctx().request_repaint();
+                }
+                Some(Err(err)) => {
+                    log::error!("Error adding model: {err}");
+                }
+                None => {}
+            }
+
+            let row_count = models_ordered.len() + if hovered { 1 } else { 0 };
+
             egui_extras::TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
@@ -107,8 +143,19 @@ impl Tab for Models {
                     });
                 })
                 .body(|body| {
-                    body.rows(text_height, models_ordered.len(), |mut row| {
+                    body.rows(text_height, row_count, |mut row| {
                         let index = row.index();
+
+                        if index == models_ordered.len() {
+                            row.col(|_| {});
+                            row.col(|ui| {
+                                ui.label("Release to Add Model");
+                            });
+                            row.col(|_| {});
+                            row.col(|_| {});
+                            return;
+                        }
+
                         let (key, model) = &mut models_ordered[index];
 
                         row.set_selected(*key == selected_model_key);
