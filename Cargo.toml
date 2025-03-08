@@ -2,9 +2,9 @@
 name = "wgpu-3dgs-viewer-app"
 version = "0.1.0"
 authors = ["Lio Qing"]
-edition = "2021"
+edition = "2024"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
-rust-version = "1.83"
+rust-version = "1.85"
 
 [package.metadata.docs.rs]
 all-features = true

@@ -6,10 +6,7 @@ use eframe::{egui_wgpu, wgpu};
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

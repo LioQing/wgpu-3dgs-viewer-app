@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Cursor,
     marker::PhantomData,
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -394,15 +394,18 @@ impl Scene {
                                 camera: $gs.camera.control.clone(),
                                 viewer_size: Vec2::from_array($rect.size().into()),
                                 query: self.query.clone(),
-                                selection: match &$gs.selection.edit {
-                                    Some(edit) => SceneCallbackSelection::Edit(edit.to_pod()),
-                                    None => SceneCallbackSelection::Highlight(
-                                        gs::SelectionHighlightPod::new(
-                                            U8Vec4::from_array(
-                                                $gs.selection.highlight_color.to_array()
-                                            ).as_vec4() / 255.0,
+                                selection: match &gs.action {
+                                    Some(app::Action::Selection) => Some(match &$gs.selection.edit {
+                                        Some(edit) => SceneCallbackSelection::Edit(edit.to_pod()),
+                                        None => SceneCallbackSelection::Highlight(
+                                            gs::SelectionHighlightPod::new(
+                                                U8Vec4::from_array(
+                                                    $gs.selection.highlight_color.to_array()
+                                                ).as_vec4() / 255.0,
+                                            ),
                                         ),
-                                    ),
+                                    }),
+                                    _ => None,
                                 },
                                 phantom: PhantomData,
                             },
@@ -726,6 +729,9 @@ impl SceneInput {
                 if let Ok(hit) = rx.try_recv() {
                     gs.measurement.hit_pairs[*hit_pair_index].hits[*hit_index].pos = hit;
                     gs.action = None;
+                    gs.scene_tx
+                        .send(app::SceneCommand::UpdateMeasurementHit)
+                        .expect("send gs");
                 }
             }
             None | Some(app::Action::Selection { .. }) => {}
@@ -1398,9 +1404,10 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         log::debug!("Creating viewer");
         // In WASM, the viewer is not Send nor Sync, but in native, it is.
         #[allow(clippy::arc_with_non_send_sync)]
-        let viewer = Arc::new(Mutex::new(gs::MultiModelViewer::new(
+        let viewer = Arc::new(Mutex::new(gs::MultiModelViewer::new_with(
             &render_state.device,
             render_state.target_format,
+            None,
             uvec2(1, 1),
         )));
 
@@ -1573,7 +1580,7 @@ struct SceneCallback<G: gs::GaussianPod + Send + Sync> {
     query: Query,
 
     /// The selection highlight or edit.
-    selection: SceneCallbackSelection,
+    selection: Option<SceneCallbackSelection>,
 
     /// The phantom data.
     phantom: PhantomData<G>,
@@ -1677,7 +1684,7 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
         );
 
         match &self.selection {
-            SceneCallbackSelection::Highlight(pod) => {
+            Some(SceneCallbackSelection::Highlight(pod)) => {
                 viewer
                     .lock()
                     .expect("viewer")
@@ -1687,11 +1694,17 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
                     .expect("viewer")
                     .update_selection_highlight_with_pod(queue, pod);
             }
-            SceneCallbackSelection::Edit(pod) => {
+            Some(SceneCallbackSelection::Edit(pod)) => {
                 viewer
                     .lock()
                     .expect("viewer")
                     .update_selection_edit_with_pod(queue, pod);
+                viewer
+                    .lock()
+                    .expect("viewer")
+                    .update_selection_highlight(queue, vec4(0.0, 0.0, 0.0, 0.0));
+            }
+            None => {
                 viewer
                     .lock()
                     .expect("viewer")

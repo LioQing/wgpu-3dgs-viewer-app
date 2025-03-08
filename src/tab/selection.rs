@@ -95,6 +95,7 @@ impl Tab for Selection {
                     Some(app::Action::Selection { .. }) => {
                         if ui.button("Selecting...").clicked() {
                             *action = None;
+                            selection.edit = None;
                         }
                     }
                     _ => {
