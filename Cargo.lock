@@ -3482,6 +3482,7 @@ dependencies = [
 [[package]]
 name = "wgpu-3dgs-viewer"
 version = "0.1.0"
+source = "git+https://github.com/LioQing/wgpu-3dgs-viewer.git#77b0bf89f6190caadf90d2908682fadffa7a5a3a"
 dependencies = [
  "bitflags 2.8.0",
  "bytemuck",

@@ -1,8 +1,8 @@
 use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn exec_task(f: impl Future<Output = ()> + Send + 'static) {
-    std::thread::spawn(move || futures::executor::block_on(f));
+pub fn exec_task(f: impl Future<Output = ()> + 'static) {
+    futures::executor::block_on(f);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -10,7 +10,7 @@ pub fn exec_task(f: impl Future<Output = ()> + 'static) {
     wasm_bindgen_futures::spawn_local(f);
 }
 
-// A wrapper that allows the more idiomatic usage pattern: `ui.add(toggle(&mut my_bool))`
+/// A wrapper that allows the more idiomatic usage pattern: `ui.add(toggle(&mut my_bool))`
 /// iOS-style toggle switch.
 ///
 /// ## Example:

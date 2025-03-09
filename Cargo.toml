@@ -21,7 +21,7 @@ strum = { version = "0.26", features = ["derive"] }
 glam = { version = "0.29.2", features = ["bytemuck"] }
 itertools = "0.14.0"
 rfd = "0.15.2"
-wgpu-3dgs-viewer = { path = "../wgpu-3dgs-viewer", features = [
+wgpu-3dgs-viewer = { git = "https://github.com/LioQing/wgpu-3dgs-viewer.git", features = [
     "query-toolset",
     "query-texture-overlay",
     "query-cursor",
