@@ -59,11 +59,11 @@ impl Tab for Models {
                     util::exec_task(async move {
                         if let Some(file) = task.await {
                             let mut reader = Cursor::new(file.read().await);
-                            let models = gs::Gaussians::read_ply(&mut reader)
+                            let result = gs::Gaussians::read_ply(&mut reader)
                                 .map(|ply| app::GaussianSplattingModel::new(file.file_name(), ply))
                                 .map_err(|e| e.to_string());
 
-                            tx.send(app::SceneCommand::AddModel(models))
+                            tx.send(app::SceneCommand::AddModel(result))
                                 .expect("send gs");
                             ctx.request_repaint();
                         }
@@ -93,7 +93,15 @@ impl Tab for Models {
                         true => gs::Gaussians::read_ply(&mut Cursor::new(
                             file.bytes.as_ref().expect("file bytes").to_vec(),
                         ))
-                        .map(|ply| app::GaussianSplattingModel::new(file.name.clone(), ply))
+                        .map(|ply| {
+                            app::GaussianSplattingModel::new(
+                                match file.name.trim().is_empty() {
+                                    true => "Unnamed".to_string(),
+                                    false => file.name.trim().to_string(),
+                                },
+                                ply,
+                            )
+                        })
                         .map_err(|e| e.to_string()),
                         false => std::fs::read(file.path.as_ref().expect("file path").clone())
                             .map(Cursor::new)
@@ -101,7 +109,15 @@ impl Tab for Models {
                             .and_then(|mut reader| {
                                 gs::Gaussians::read_ply(&mut reader).map_err(|e| e.to_string())
                             })
-                            .map(|ply| app::GaussianSplattingModel::new(file.name.clone(), ply)),
+                            .map(|ply| {
+                                app::GaussianSplattingModel::new(
+                                    match file.name.trim().is_empty() {
+                                        true => "Unnamed".to_string(),
+                                        false => file.name.trim().to_string(),
+                                    },
+                                    ply,
+                                )
+                            }),
                     })),
                     _ => None,
                 }) {
@@ -123,10 +139,7 @@ impl Tab for Models {
                 .striped(true)
                 .resizable(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(egui_extras::Column::auto())
-                .column(egui_extras::Column::auto())
-                .column(egui_extras::Column::auto())
-                .column(egui_extras::Column::auto())
+                .columns(egui_extras::Column::auto(), 4)
                 .min_scrolled_height(0.0)
                 .max_scroll_height(available_height)
                 .sense(egui::Sense::click())
@@ -165,17 +178,20 @@ impl Tab for Models {
                         });
                         row.col(|ui| {
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::Label::new(match model.file_name.as_str() {
-                                        "" => "[Unnamed]",
-                                        s => s,
-                                    })
-                                    .selectable(false),
-                                );
+                                ui.add(egui::Label::new(&model.file_name).selectable(false));
                             });
                         });
-                        row.col(|ui| {
-                            ui.checkbox(&mut model.visible, "");
+                        row.col(|ui| match model.visible {
+                            true => {
+                                if ui.button("👁").clicked() {
+                                    model.visible = false;
+                                }
+                            }
+                            false => {
+                                if ui.button("―").clicked() {
+                                    model.visible = true;
+                                }
+                            }
                         });
 
                         row.col(|ui| {

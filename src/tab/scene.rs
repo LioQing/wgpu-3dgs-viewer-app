@@ -191,13 +191,13 @@ impl Scene {
 
                 util::exec_task(async move {
                     if let Some(file) = task.await {
+                        let filename = match file.file_name().trim().is_empty() {
+                            true => "Unnamed".to_string(),
+                            false => file.file_name().trim().to_string(),
+                        };
                         let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplatting::new(
-                            file.file_name(),
-                            &mut reader,
-                            compressions,
-                        )
-                        .map_err(|e| e.to_string());
+                        let gs = app::GaussianSplatting::new(filename, &mut reader, compressions)
+                            .map_err(|e| e.to_string());
 
                         tx.send(gs).expect("send gs");
                         ctx.request_repaint();
@@ -222,7 +222,10 @@ impl Scene {
                     [_x, _xs, ..] => Some(Err("only one file is allowed")),
                     [file] => Some(Ok(match cfg!(target_arch = "wasm32") {
                         true => app::GaussianSplatting::new(
-                            file.name.clone(),
+                            match file.name.trim().is_empty() {
+                                true => "Unnamed".to_string(),
+                                false => file.name.trim().to_string(),
+                            },
                             &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
                             compressions.clone(),
                         )
@@ -232,7 +235,10 @@ impl Scene {
                             .map_err(|e| e.to_string())
                             .and_then(|data| {
                                 app::GaussianSplatting::new(
-                                    file.name.clone(),
+                                    match file.name.trim().is_empty() {
+                                        true => "Unnamed".to_string(),
+                                        false => file.name.trim().to_string(),
+                                    },
                                     &mut Cursor::new(data),
                                     compressions.clone(),
                                 )
@@ -1683,29 +1689,29 @@ enum SceneInputWebEvent {
 ///
 /// This is for the [`SceneCallback`].
 #[derive(Debug)]
-struct SceneResource<G: gs::GaussianPod> {
+pub struct SceneResource<G: gs::GaussianPod> {
     /// The viewer.
     ///
     /// The viewer should not be used in multiple threads in native, always use blocking code.
     ///
     /// Required to use [`Mutex`] because the callback resources requires [`Send`] and [`Sync`]
     /// on native.
-    viewer: Arc<Mutex<gs::MultiModelViewer<G>>>,
+    pub viewer: Arc<Mutex<gs::MultiModelViewer<G>>>,
 
     /// The measurement renderer.
-    measurement_renderer: renderer::Measurement,
+    pub measurement_renderer: renderer::Measurement,
 
     /// The visible measurement hit pair.
-    measurement_visible_hit_pairs: Vec<app::MeasurementHitPair>,
+    pub measurement_visible_hit_pairs: Vec<app::MeasurementHitPair>,
 
     /// The query toolset.
-    query_toolset: gs::QueryToolset,
+    pub query_toolset: gs::QueryToolset,
 
     /// The query texture overlay.
-    query_texture_overlay: gs::QueryTextureOverlay,
+    pub query_texture_overlay: gs::QueryTextureOverlay,
 
     /// The query cursor.
-    query_cursor: gs::QueryCursor,
+    pub query_cursor: gs::QueryCursor,
 }
 
 impl<G: gs::GaussianPod> SceneResource<G> {

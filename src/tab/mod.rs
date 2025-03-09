@@ -6,7 +6,7 @@ mod camera;
 mod measurement;
 mod metadata;
 mod models;
-mod scene;
+pub mod scene;
 mod selection;
 mod transform;
 

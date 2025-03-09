@@ -6,6 +6,7 @@ use std::{
 };
 
 use glam::*;
+use itertools::Itertools;
 use strum::{Display, EnumCount, EnumIter, IntoEnumIterator};
 use wgpu_3dgs_viewer as gs;
 
@@ -58,7 +59,7 @@ impl App {
     }
 
     /// Create the menu bar.
-    fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("Open model").clicked() {
@@ -76,10 +77,13 @@ impl App {
 
                     util::exec_task(async move {
                         if let Some(file) = task.await {
+                            let filename = match file.file_name().trim().is_empty() {
+                                true => "Unnamed".to_string(),
+                                false => file.file_name().trim().to_string(),
+                            };
                             let mut reader = Cursor::new(file.read().await);
-                            let gs =
-                                GaussianSplatting::new(file.file_name(), &mut reader, compressions)
-                                    .map_err(|e| e.to_string());
+                            let gs = GaussianSplatting::new(filename, &mut reader, compressions)
+                                .map_err(|e| e.to_string());
 
                             tx.send(gs).expect("send gs");
                             ctx.request_repaint();
@@ -94,6 +98,19 @@ impl App {
                     .clicked()
                 {
                     self.state.gs = Loadable::unloaded();
+                    ui.close_menu();
+                }
+
+                if ui
+                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Export model"))
+                    .clicked()
+                {
+                    let Loadable::Loaded(gs) = &mut self.state.gs else {
+                        unreachable!()
+                    };
+
+                    gs.export_modal = Some(ExportModal::new(gs.models.len()));
+
                     ui.close_menu();
                 }
 
@@ -128,6 +145,7 @@ impl App {
 
                 if !cfg!(target_arch = "wasm32") {
                     ui.separator();
+
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -147,6 +165,42 @@ impl App {
                 egui::warn_if_debug_build(ui);
             }
         });
+
+        if let Loadable::Loaded(gs) = &mut self.state.gs {
+            if let Some(export_modal) = &mut gs.export_modal {
+                macro_rules! case {
+                    ($sh:ident, $cov3d:ident) => {
+                        Compressions {
+                            sh: ShCompression::$sh,
+                            cov3d: Cov3dCompression::$cov3d,
+                        }
+                    };
+                }
+
+                macro_rules! ui {
+                    ($sh:ident, $cov3d:ident) => {
+                        paste::paste! {
+                            if !export_modal.ui::<
+                                gs::[<GaussianPodWithSh $sh Cov3d $cov3d Configs>]
+                            >(ui, frame, &gs.models) {
+                                gs.export_modal = None;
+                            }
+                        }
+                    };
+                }
+
+                match &gs.compressions {
+                    case!(Single, Single) => ui!(Single, Single),
+                    case!(Single, Half) => ui!(Single, Half),
+                    case!(Half, Single) => ui!(Half, Single),
+                    case!(Half, Half) => ui!(Half, Half),
+                    case!(Norm8, Single) => ui!(Norm8, Single),
+                    case!(Norm8, Half) => ui!(Norm8, Half),
+                    case!(Remove, Single) => ui!(None, Single),
+                    case!(Remove, Half) => ui!(None, Half),
+                }
+            }
+        }
     }
 
     /// Show the about dialog.
@@ -221,7 +275,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            self.menu_bar(ctx, ui);
+            self.menu_bar(ctx, ui, frame);
         });
 
         egui::CentralPanel::default()
@@ -421,6 +475,9 @@ pub struct GaussianSplatting {
 
     /// The used compression settings.
     pub compressions: Compressions,
+
+    /// The export modal.
+    pub export_modal: Option<ExportModal>,
 }
 
 impl GaussianSplatting {
@@ -457,6 +514,7 @@ impl GaussianSplatting {
             measurement,
             selection,
             compressions,
+            export_modal: None,
         })
     }
 
@@ -465,6 +523,279 @@ impl GaussianSplatting {
         self.models
             .get(&self.selected_model_key)
             .expect("selected model")
+    }
+}
+
+/// The stages of export.
+#[derive(Debug)]
+pub enum ExportStage {
+    /// Waiting for edits download.
+    Edits(oneshot::Receiver<Vec<Vec<gs::GaussianEditPod>>>),
+
+    /// Waiting for save location.
+    Save {
+        rx: oneshot::Receiver<Option<rfd::FileHandle>>,
+        edits: Vec<Vec<gs::GaussianEditPod>>,
+    },
+}
+
+/// The export modal.
+#[derive(Debug)]
+pub struct ExportModal {
+    /// The export settings.
+    pub settings: Vec<ExportSettings>,
+
+    /// The receiver for the edits download.
+    pub stage: Option<ExportStage>,
+}
+
+impl ExportModal {
+    /// Create a new export modal.
+    pub fn new(count: usize) -> Self {
+        Self {
+            settings: vec![ExportSettings::default(); count],
+            stage: None,
+        }
+    }
+
+    /// The ui.
+    ///
+    /// Returns whether the export modal should be kept alive.
+    fn ui<G: gs::GaussianPod>(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        models: &HashMap<String, GaussianSplattingModel>,
+    ) -> bool {
+        let mut alive = true;
+
+        let models_ordered = models
+            .iter()
+            .sorted_by_key(|(k, _)| (*k).clone())
+            .collect::<Vec<_>>();
+
+        egui::Modal::new(egui::Id::new("export_modal")).show(ui.ctx(), |ui| {
+            ui.add(egui::Label::new(
+                egui::RichText::new("Export model").heading(),
+            ));
+            ui.separator();
+
+            ui.label("Please confirm the following models to export");
+            ui.label("");
+
+            let text_height = egui::TextStyle::Body
+                .resolve(ui.style())
+                .size
+                .max(ui.spacing().interact_size.y);
+
+            let available_height = ui.available_height();
+
+            egui_extras::TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .columns(egui_extras::Column::auto(), 3)
+                .min_scrolled_height(0.0)
+                .max_scroll_height(available_height)
+                .header(20.0, |mut header| {
+                    header.col(|ui| {
+                        let mut all_export = self.settings.iter().all(|s| s.export);
+                        if ui.checkbox(&mut all_export, "").clicked() {
+                            for s in &mut self.settings {
+                                s.export = all_export;
+                            }
+                        }
+                    });
+                    header.col(|ui| {
+                        ui.strong("File Name");
+                    });
+                    header.col(|ui| {
+                        let mut all_edit = self.settings.iter().all(|s| s.edit);
+                        if ui.checkbox(&mut all_edit, "").clicked() {
+                            for s in &mut self.settings {
+                                s.edit = all_edit;
+                            }
+                        }
+                        ui.strong("Edit");
+                    });
+                })
+                .body(|body| {
+                    body.rows(text_height, models.len(), |mut row| {
+                        let index = row.index();
+
+                        let setting = &mut self.settings[index];
+                        let (_, model) = &models_ordered[index];
+
+                        row.col(|ui| {
+                            ui.checkbox(&mut setting.export, "");
+                        });
+
+                        row.col(|ui| {
+                            ui.label(&model.file_name);
+                        });
+
+                        row.col(|ui| {
+                            ui.checkbox(&mut setting.edit, "");
+                        });
+                    });
+                });
+            ui.label("");
+
+            ui.horizontal(|ui| {
+                if ui.button("Confirm").clicked() {
+                    let (tx, rx) = oneshot::channel();
+                    self.stage = Some(ExportStage::Edits(rx));
+
+                    let render_state = frame.wgpu_render_state().expect("render state");
+                    let renderer = render_state.renderer.read();
+                    let tab::scene::SceneResource::<G> { viewer, .. } =
+                        renderer.callback_resources.get().expect("scene");
+                    let viewer = viewer.lock().expect("viewer");
+
+                    let device = render_state.device.clone();
+                    let queue = render_state.queue.clone();
+                    let edit_buffers = models_ordered
+                        .iter()
+                        .map(|(k, _)| {
+                            viewer
+                                .models
+                                .get(*k)
+                                .expect("model")
+                                .gaussian_buffers
+                                .gaussians_edit_buffer
+                                .clone()
+                        })
+                        .collect::<Vec<_>>();
+
+                    util::exec_task(async move {
+                        let mut edits = Vec::with_capacity(edit_buffers.len());
+                        for buffer in edit_buffers {
+                            match buffer.download(&device, &queue).await {
+                                Ok(edit) => edits.push(edit),
+                                Err(e) => {
+                                    log::error!("Download edit buffer: {e}");
+                                    edits.push(Vec::new());
+                                }
+                            }
+                        }
+
+                        tx.send(edits).expect("send edits");
+                    });
+                }
+
+                if ui.button("Cancel").clicked() {
+                    alive = false;
+                }
+            });
+        });
+
+        match &self.stage {
+            Some(ExportStage::Edits(rx)) => {
+                if let Ok(edits) = rx.try_recv() {
+                    let task = rfd::AsyncFileDialog::new()
+                        .set_title("Save the exported models")
+                        .set_file_name(match edits.len() {
+                            1 if models_ordered[0].0.to_lowercase().ends_with(".ply") => {
+                                models_ordered[0].0.clone()
+                            }
+                            1 => format!("{}.ply", models_ordered[0].0),
+                            _ => "models.zip".to_string(),
+                        })
+                        .save_file();
+
+                    let (tx, rx) = oneshot::channel();
+                    self.stage = Some(ExportStage::Save { rx, edits });
+
+                    util::exec_task(async move {
+                        let file = task.await;
+                        tx.send(file).expect("send file");
+                    });
+                }
+            }
+            Some(ExportStage::Save { rx, edits }) => {
+                if let Ok(Some(file)) = rx.try_recv() {
+                    let mut cursor = Cursor::new(Vec::new());
+                    self.export_models(&mut cursor, models_ordered.iter().map(|(_, m)| *m), edits)
+                        .expect("export models");
+
+                    util::exec_task(async move {
+                        if let Err(e) = file.write(cursor.into_inner().as_slice()).await {
+                            log::error!("Save file: {e}");
+                        }
+                    });
+
+                    alive = false;
+                }
+            }
+            _ => {}
+        }
+
+        alive
+    }
+
+    /// Export the models.
+    pub fn export_models<'a, W: std::io::Write + std::io::Seek>(
+        &self,
+        writer: &mut W,
+        models: impl IntoIterator<Item = &'a GaussianSplattingModel>,
+        edits: &[Vec<gs::GaussianEditPod>],
+    ) -> Result<(), String> {
+        if edits.len() == 1 {
+            return models
+                .into_iter()
+                .next()
+                .expect("model")
+                .gaussians
+                .write_ply(writer, Some(&edits[0]))
+                .map_err(|e| e.to_string());
+        }
+
+        let mut zip = zip::ZipWriter::new(writer);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+
+        itertools::multizip((models.into_iter(), self.settings.iter(), edits.iter()))
+            .filter(|(_, s, _)| s.export)
+            .try_for_each(|(model, setting, edit)| {
+                zip.start_file(model.file_name.clone(), options)
+                    .map_err(|e| e.to_string())?;
+
+                model
+                    .gaussians
+                    .write_ply(&mut zip, setting.edit.then_some(edit))
+                    .map_err(|e| e.to_string())
+            })?;
+
+        zip.finish().map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+}
+
+/// The export modal settings.
+#[derive(Debug, Clone)]
+pub struct ExportSettings {
+    /// Export or not.
+    pub export: bool,
+
+    /// Apply the edit or not.
+    pub edit: bool,
+}
+
+impl ExportSettings {
+    /// Create a new export settings.
+    pub fn new() -> Self {
+        Self {
+            export: true,
+            edit: true,
+        }
+    }
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
