@@ -1,10 +1,12 @@
 use std::{
+    collections::HashMap,
     io::{BufRead, Cursor},
     ops::Range,
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc,
 };
 
 use glam::*;
+use itertools::Itertools;
 use strum::{Display, EnumCount, EnumIter, IntoEnumIterator};
 use wgpu_3dgs_viewer as gs;
 
@@ -57,7 +59,7 @@ impl App {
     }
 
     /// Create the menu bar.
-    fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("Open model").clicked() {
@@ -75,10 +77,13 @@ impl App {
 
                     util::exec_task(async move {
                         if let Some(file) = task.await {
-                            let mut reader = Cursor::new(file.read().await);
-                            let gs =
-                                GaussianSplatting::new(file.file_name(), &mut reader, compressions)
-                                    .map_err(|e| e.to_string());
+                            let filename = match file.file_name().trim().is_empty() {
+                                true => "Unnamed".to_string(),
+                                false => file.file_name().trim().to_string(),
+                            };
+                            let reader = Cursor::new(file.read().await);
+                            let gs = GaussianSplatting::new(filename, reader, compressions)
+                                .map_err(|e| e.to_string());
 
                             tx.send(gs).expect("send gs");
                             ctx.request_repaint();
@@ -89,10 +94,23 @@ impl App {
                 }
 
                 if ui
-                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Close model"))
+                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Close models"))
                     .clicked()
                 {
                     self.state.gs = Loadable::unloaded();
+                    ui.close_menu();
+                }
+
+                if ui
+                    .add_enabled(self.state.gs.is_loaded(), egui::Button::new("Export model"))
+                    .clicked()
+                {
+                    let Loadable::Loaded(gs) = &mut self.state.gs else {
+                        unreachable!()
+                    };
+
+                    gs.export_modal = Some(ExportModal::new(gs.models.len()));
+
                     ui.close_menu();
                 }
 
@@ -127,6 +145,7 @@ impl App {
 
                 if !cfg!(target_arch = "wasm32") {
                     ui.separator();
+
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -141,11 +160,71 @@ impl App {
 
             egui::widgets::global_theme_preference_buttons(ui);
 
+            ui.separator();
+
+            ui.add(
+                egui::Hyperlink::from_label_and_url(
+                    "[Native App]",
+                    "https://github.com/LioQing/wgpu-3dgs-viewer-app/releases",
+                )
+                .open_in_new_tab(true),
+            );
+            ui.add(
+                egui::Hyperlink::from_label_and_url(
+                    "[Source Code]",
+                    "https://github.com/lioqing/wgpu-3dgs-viewer-app",
+                )
+                .open_in_new_tab(true),
+            );
+            ui.add(
+                egui::Hyperlink::from_label_and_url(
+                    "[3DGS Models]",
+                    "https://drive.google.com/drive/folders/1WXCpR3kshQt2jmOtuCBsHKfzt1IMqey2",
+                )
+                .open_in_new_tab(true),
+            );
+
             if cfg!(debug_assertions) {
                 ui.separator();
                 egui::warn_if_debug_build(ui);
             }
         });
+
+        if let Loadable::Loaded(gs) = &mut self.state.gs {
+            if let Some(export_modal) = &mut gs.export_modal {
+                macro_rules! case {
+                    ($sh:ident, $cov3d:ident) => {
+                        Compressions {
+                            sh: ShCompression::$sh,
+                            cov3d: Cov3dCompression::$cov3d,
+                        }
+                    };
+                }
+
+                macro_rules! ui {
+                    ($sh:ident, $cov3d:ident) => {
+                        paste::paste! {
+                            if !export_modal.ui::<
+                                gs::[<GaussianPodWithSh $sh Cov3d $cov3d Configs>]
+                            >(ui, frame, &gs.models) {
+                                gs.export_modal = None;
+                            }
+                        }
+                    };
+                }
+
+                match &gs.compressions {
+                    case!(Single, Single) => ui!(Single, Single),
+                    case!(Single, Half) => ui!(Single, Half),
+                    case!(Half, Single) => ui!(Half, Single),
+                    case!(Half, Half) => ui!(Half, Half),
+                    case!(Norm8, Single) => ui!(Norm8, Single),
+                    case!(Norm8, Half) => ui!(Norm8, Half),
+                    case!(Remove, Single) => ui!(None, Single),
+                    case!(Remove, Half) => ui!(None, Half),
+                }
+            }
+        }
     }
 
     /// Show the about dialog.
@@ -185,24 +264,12 @@ impl App {
                     egui::Hyperlink::from_label_and_url("[wgpu]", "https://wgpu.rs")
                         .open_in_new_tab(true),
                 );
-                ui.label(", ");
+                ui.label(" and ");
                 ui.add(
                     egui::Hyperlink::from_label_and_url("[egui]", "https://github.com/emilk/egui")
                         .open_in_new_tab(true),
                 );
-                ui.label(" and ");
-                ui.add(
-                    egui::Hyperlink::from_label_and_url(
-                        "[eframe]",
-                        "https://github.com/emilk/egui/tree/master/crates/eframe",
-                    )
-                    .open_in_new_tab(true),
-                );
                 ui.label(". ");
-                ui.hyperlink_to(
-                    "[Source Code]",
-                    "https://github.com/lioqing/wgpu-3dgs-viewer-app",
-                );
             });
         });
     }
@@ -215,7 +282,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            self.menu_bar(ctx, ui);
+            self.menu_bar(ctx, ui, frame);
         });
 
         egui::CentralPanel::default()
@@ -320,8 +387,8 @@ pub enum Cov3dCompression {
 /// An unloaded value.
 #[derive(Debug)]
 pub struct Unloaded<T, E> {
-    pub tx: Sender<Result<T, E>>,
-    pub rx: Receiver<Result<T, E>>,
+    pub tx: mpsc::Sender<Result<T, E>>,
+    pub rx: mpsc::Receiver<Result<T, E>>,
     pub err: Option<E>,
 }
 
@@ -335,13 +402,13 @@ pub enum Loadable<T, E> {
 impl<T, E> Loadable<T, E> {
     /// Create an unloaded instance of the loadable value.
     pub fn unloaded() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         Self::Unloaded(Unloaded { tx, rx, err: None })
     }
 
     /// Create an error instance of the loadable value.
     pub fn error(err: E) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         Self::Unloaded(Unloaded {
             tx,
             rx,
@@ -366,20 +433,55 @@ impl<T, E> Default for Loadable<T, E> {
     }
 }
 
+/// The scene commands.
+///
+/// This is for updating expensive scene data, scene will take this and update the resource.
+///
+/// For cheap data, they are updated in the scene tab by cloning the needed data from state.
+pub enum SceneCommand {
+    /// Add a new model.
+    AddModel {
+        file_name: String,
+        reader: Box<dyn BufRead + Send>,
+    },
+
+    /// Remove a model.
+    RemoveModel(String),
+
+    /// Update the measurement hit.
+    UpdateMeasurementHit,
+}
+
+impl std::fmt::Debug for SceneCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AddModel { .. } => write!(f, "AddModel"),
+            Self::RemoveModel(_) => write!(f, "RemoveModel"),
+            Self::UpdateMeasurementHit => write!(f, "UpdateMeasurementHit"),
+        }
+    }
+}
+
 /// The Gaussian splatting model.
 #[derive(Debug)]
 pub struct GaussianSplatting {
-    /// The file name of the opened Gaussian splatting model.
-    pub file_name: String,
-
     /// The camera to view the model.
     pub camera: Camera,
 
-    /// The Gaussians parsed from the model.
-    pub gaussians: gs::Gaussians,
+    /// The Gaussian models loaded.
+    pub models: HashMap<String, GaussianSplattingModel>,
 
-    /// The model transform.
-    pub model_transform: GaussianSplattingModelTransform,
+    /// The Gaussian model loader receiver.
+    pub model_loader: Option<(String, mpsc::Receiver<Result<gs::Gaussian, gs::Error>>)>,
+
+    /// The sender for scene to handle scene related updates.
+    pub scene_tx: mpsc::Sender<SceneCommand>,
+
+    /// The receiver for scene to handle scene related updates.
+    pub scene_rx: mpsc::Receiver<SceneCommand>,
+
+    /// The currently selected Gaussian model.
+    pub selected_model_key: String,
 
     /// The Gaussian transform.
     pub gaussian_transform: GaussianSplattingGaussianTransform,
@@ -395,13 +497,16 @@ pub struct GaussianSplatting {
 
     /// The used compression settings.
     pub compressions: Compressions,
+
+    /// The export modal.
+    pub export_modal: Option<ExportModal>,
 }
 
 impl GaussianSplatting {
     /// Create a Gaussian splatting model from a PLY file.
     pub fn new(
         file_name: String,
-        ply: &mut impl BufRead,
+        ply: impl BufRead + Send + 'static,
         compressions: Compressions,
     ) -> Result<Self, gs::Error> {
         let selection = Selection::new();
@@ -410,25 +515,312 @@ impl GaussianSplatting {
 
         let gaussian_transform = GaussianSplattingGaussianTransform::new();
 
-        let model_transform = GaussianSplattingModelTransform::new();
+        let (count, gaussian_rx) = GaussianSplattingModel::init_load(ply)?;
 
-        let gaussians = gs::Gaussians::read_ply(ply)?;
+        let model = GaussianSplattingModel::new(file_name, count);
 
-        let camera = Camera::new(&gaussians, &model_transform);
+        let key = model.file_name.clone();
+
+        let (scene_tx, scene_rx) = mpsc::channel();
+
+        let camera = Camera::new();
 
         log::info!("Gaussian splatting model loaded");
 
         Ok(Self {
-            file_name,
             camera,
-            gaussians,
-            model_transform,
+            models: HashMap::from([(key.clone(), model)]),
+            model_loader: Some((key.clone(), gaussian_rx)),
+            scene_tx,
+            scene_rx,
+            selected_model_key: key,
             gaussian_transform,
             action: None,
             measurement,
             selection,
             compressions,
+            export_modal: None,
         })
+    }
+
+    /// Get the currently selected model.
+    pub fn selected_model(&self) -> &GaussianSplattingModel {
+        self.models
+            .get(&self.selected_model_key)
+            .expect("selected model")
+    }
+}
+
+/// The stages of export.
+#[derive(Debug)]
+pub enum ExportStage {
+    /// Waiting for edits download.
+    Edits(oneshot::Receiver<Vec<Vec<gs::GaussianEditPod>>>),
+
+    /// Waiting for save location.
+    Save {
+        rx: oneshot::Receiver<Option<rfd::FileHandle>>,
+        edits: Vec<Vec<gs::GaussianEditPod>>,
+    },
+}
+
+/// The export modal.
+#[derive(Debug)]
+pub struct ExportModal {
+    /// The export settings.
+    pub settings: Vec<ExportSettings>,
+
+    /// The receiver for the edits download.
+    pub stage: Option<ExportStage>,
+}
+
+impl ExportModal {
+    /// Create a new export modal.
+    pub fn new(count: usize) -> Self {
+        Self {
+            settings: vec![ExportSettings::default(); count],
+            stage: None,
+        }
+    }
+
+    /// The ui.
+    ///
+    /// Returns whether the export modal should be kept alive.
+    fn ui<G: gs::GaussianPod>(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        models: &HashMap<String, GaussianSplattingModel>,
+    ) -> bool {
+        let mut alive = true;
+
+        let models_ordered = models
+            .iter()
+            .sorted_by_key(|(k, _)| (*k).clone())
+            .collect::<Vec<_>>();
+
+        egui::Modal::new(egui::Id::new("export_modal")).show(ui.ctx(), |ui| {
+            ui.add(egui::Label::new(
+                egui::RichText::new("Export model").heading(),
+            ));
+            ui.separator();
+
+            ui.label("Please confirm the following models to export");
+            ui.label("");
+
+            let text_height = egui::TextStyle::Body
+                .resolve(ui.style())
+                .size
+                .max(ui.spacing().interact_size.y);
+
+            let available_height = ui.available_height();
+
+            egui_extras::TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .columns(egui_extras::Column::auto(), 3)
+                .min_scrolled_height(0.0)
+                .max_scroll_height(available_height)
+                .header(20.0, |mut header| {
+                    header.col(|ui| {
+                        let mut all_export = self.settings.iter().all(|s| s.export);
+                        if ui.checkbox(&mut all_export, "").clicked() {
+                            for s in &mut self.settings {
+                                s.export = all_export;
+                            }
+                        }
+                    });
+                    header.col(|ui| {
+                        ui.strong("File Name");
+                    });
+                    header.col(|ui| {
+                        let mut all_edit = self.settings.iter().all(|s| s.edit);
+                        if ui.checkbox(&mut all_edit, "").clicked() {
+                            for s in &mut self.settings {
+                                s.edit = all_edit;
+                            }
+                        }
+                        ui.strong("Edit");
+                    });
+                })
+                .body(|body| {
+                    body.rows(text_height, models.len(), |mut row| {
+                        let index = row.index();
+
+                        let setting = &mut self.settings[index];
+                        let (_, model) = &models_ordered[index];
+
+                        row.col(|ui| {
+                            ui.checkbox(&mut setting.export, "");
+                        });
+
+                        row.col(|ui| {
+                            ui.label(&model.file_name);
+                        });
+
+                        row.col(|ui| {
+                            ui.checkbox(&mut setting.edit, "");
+                        });
+                    });
+                });
+            ui.label("");
+
+            ui.horizontal(|ui| {
+                if ui.button("Confirm").clicked() {
+                    let (tx, rx) = oneshot::channel();
+                    self.stage = Some(ExportStage::Edits(rx));
+
+                    let render_state = frame.wgpu_render_state().expect("render state");
+                    let renderer = render_state.renderer.read();
+                    let tab::scene::SceneResource::<G> { viewer, .. } =
+                        renderer.callback_resources.get().expect("scene");
+                    let viewer = viewer.lock().expect("viewer");
+
+                    let device = render_state.device.clone();
+                    let queue = render_state.queue.clone();
+                    let edit_buffers = models_ordered
+                        .iter()
+                        .map(|(k, _)| {
+                            viewer
+                                .models
+                                .get(*k)
+                                .expect("model")
+                                .gaussian_buffers
+                                .gaussians_edit_buffer
+                                .clone()
+                        })
+                        .collect::<Vec<_>>();
+
+                    util::exec_task(async move {
+                        let mut edits = Vec::with_capacity(edit_buffers.len());
+                        for buffer in edit_buffers {
+                            match buffer.download(&device, &queue).await {
+                                Ok(edit) => edits.push(edit),
+                                Err(e) => {
+                                    log::error!("Download edit buffer: {e}");
+                                    edits.push(Vec::new());
+                                }
+                            }
+                        }
+
+                        tx.send(edits).expect("send edits");
+                    });
+                }
+
+                if ui.button("Cancel").clicked() {
+                    alive = false;
+                }
+            });
+        });
+
+        match &self.stage {
+            Some(ExportStage::Edits(rx)) => {
+                if let Ok(edits) = rx.try_recv() {
+                    let task = rfd::AsyncFileDialog::new()
+                        .set_title("Save the exported models")
+                        .set_file_name(match edits.len() {
+                            1 if models_ordered[0].0.to_lowercase().ends_with(".ply") => {
+                                models_ordered[0].0.clone()
+                            }
+                            1 => format!("{}.ply", models_ordered[0].0),
+                            _ => "models.zip".to_string(),
+                        })
+                        .save_file();
+
+                    let (tx, rx) = oneshot::channel();
+                    self.stage = Some(ExportStage::Save { rx, edits });
+
+                    util::exec_task(async move {
+                        let file = task.await;
+                        tx.send(file).expect("send file");
+                    });
+                }
+            }
+            Some(ExportStage::Save { rx, edits }) => {
+                if let Ok(Some(file)) = rx.try_recv() {
+                    let mut cursor = Cursor::new(Vec::new());
+                    self.export_models(&mut cursor, models_ordered.iter().map(|(_, m)| *m), edits)
+                        .expect("export models");
+
+                    util::exec_task(async move {
+                        if let Err(e) = file.write(cursor.into_inner().as_slice()).await {
+                            log::error!("Save file: {e}");
+                        }
+                    });
+
+                    alive = false;
+                }
+            }
+            _ => {}
+        }
+
+        alive
+    }
+
+    /// Export the models.
+    pub fn export_models<'a, W: std::io::Write + std::io::Seek>(
+        &self,
+        writer: &mut W,
+        models: impl IntoIterator<Item = &'a GaussianSplattingModel>,
+        edits: &[Vec<gs::GaussianEditPod>],
+    ) -> Result<(), String> {
+        if edits.len() == 1 {
+            return models
+                .into_iter()
+                .next()
+                .expect("model")
+                .gaussians
+                .write_ply(writer, Some(&edits[0]))
+                .map_err(|e| e.to_string());
+        }
+
+        let mut zip = zip::ZipWriter::new(writer);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+
+        itertools::multizip((models.into_iter(), self.settings.iter(), edits.iter()))
+            .filter(|(_, s, _)| s.export)
+            .try_for_each(|(model, setting, edit)| {
+                zip.start_file(model.file_name.clone(), options)
+                    .map_err(|e| e.to_string())?;
+
+                model
+                    .gaussians
+                    .write_ply(&mut zip, setting.edit.then_some(edit))
+                    .map_err(|e| e.to_string())
+            })?;
+
+        zip.finish().map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+}
+
+/// The export modal settings.
+#[derive(Debug, Clone)]
+pub struct ExportSettings {
+    /// Export or not.
+    pub export: bool,
+
+    /// Apply the edit or not.
+    pub edit: bool,
+}
+
+impl ExportSettings {
+    /// Create a new export settings.
+    pub fn new() -> Self {
+        Self {
+            export: true,
+            edit: true,
+        }
+    }
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -446,14 +838,103 @@ pub enum Action {
         hit_index: usize,
 
         /// The sender to send the result.
-        tx: Sender<Vec3>,
+        tx: mpsc::Sender<Vec3>,
 
         /// The receiver to receive the result.
-        rx: Receiver<Vec3>,
+        rx: mpsc::Receiver<Vec3>,
     },
 
     /// Selecting.
     Selection,
+}
+
+/// The Gaussian splatting model.
+#[derive(Debug)]
+pub struct GaussianSplattingModel {
+    /// The file name.
+    pub file_name: String,
+
+    /// The Gaussians.
+    pub gaussians: gs::Gaussians,
+
+    /// The transform.
+    pub transform: GaussianSplattingModelTransform,
+
+    /// The center of the bounding box.
+    pub center: Vec3,
+
+    /// Whether the model is visible.
+    pub visible: bool,
+}
+
+impl GaussianSplattingModel {
+    /// Create a new Gaussian splatting model.
+    pub fn new(file_name: String, count: usize) -> Self {
+        let gaussians = gs::Gaussians {
+            gaussians: Vec::with_capacity(count),
+        };
+
+        Self {
+            file_name,
+            gaussians,
+            transform: GaussianSplattingModelTransform::new(),
+            center: Vec3::ZERO,
+            visible: true,
+        }
+    }
+
+    /// Get the center in world space.
+    pub fn world_center(&self) -> Vec3 {
+        self.transform.quat() * (self.center * self.transform.scale) + self.transform.pos
+    }
+
+    /// Initialize loading a model.
+    ///
+    /// This starts a task and sends to the returned [`mpsc::Receiver`].
+    ///
+    /// Returns the number of Gaussians and the receiver.
+    pub fn init_load(
+        mut ply: impl BufRead + Send + 'static,
+    ) -> Result<(usize, mpsc::Receiver<Result<gs::Gaussian, gs::Error>>), gs::Error> {
+        let ply_header = gs::Gaussians::read_ply_header(&mut ply)?;
+        let count = ply_header.count()?;
+
+        let (tx, rx) = mpsc::channel();
+
+        util::exec_task(async move {
+            match gs::Gaussians::read_ply_gaussians(&mut ply, ply_header) {
+                Ok(iter) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    for g in iter {
+                        if let Err(err) = tx.send(g.map(gs::Gaussian::from)) {
+                            log::error!("Send error: {err}");
+                        }
+                    }
+
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let chunks = iter.chunks(1000);
+                        for chunk in &chunks {
+                            for g in chunk {
+                                if let Err(err) = tx.send(g.map(gs::Gaussian::from)) {
+                                    log::error!("Send error: {err}");
+                                }
+                            }
+
+                            gloo_timers::future::TimeoutFuture::new(0).await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Err(err) = tx.send(Err(err)) {
+                        log::error!("Send error: {err}");
+                    }
+                }
+            }
+        });
+
+        Ok((count, rx))
+    }
 }
 
 /// The Gaussian splatting model transform.
@@ -474,7 +955,7 @@ impl GaussianSplattingModelTransform {
     pub const fn new() -> Self {
         Self {
             pos: Vec3::ZERO,
-            rot: Vec3::new(0.0, 0.0, 180.0),
+            rot: Vec3::ZERO,
             scale: Vec3::ONE,
         }
     }
@@ -545,27 +1026,14 @@ pub struct Camera {
 
 impl Camera {
     /// Create a new camera.
-    pub fn new(
-        gaussians: &gs::Gaussians,
-        model_transform: &GaussianSplattingModelTransform,
-    ) -> Self {
-        let target = gaussians
-            .gaussians
-            .iter()
-            .map(|g| model_transform.quat() * g.pos)
-            .sum::<Vec3>()
-            / gaussians.gaussians.len() as f32;
-        let pos = target
-            + Vec3::Z
-                * gaussians
-                    .gaussians
-                    .iter()
-                    .map(|g| (model_transform.quat() * g.pos).z - target.z)
-                    .fold(f32::INFINITY, |a, b| a.min(b));
-        let control = CameraOrbitControl::new(target, pos, 0.1..1e4, 60f32.to_radians());
-
+    pub fn new() -> Self {
         Self {
-            control: CameraControl::Orbit(control),
+            control: CameraControl::Orbit(CameraOrbitControl::new(
+                Vec3::ZERO,
+                Vec3::NEG_Z,
+                0.1..1e4,
+                60f32.to_radians(),
+            )),
             speed: 1.0,
             sensitivity: 0.5,
         }
@@ -574,16 +1042,7 @@ impl Camera {
 
 impl Default for Camera {
     fn default() -> Self {
-        Self {
-            control: CameraControl::Orbit(CameraOrbitControl::new(
-                Vec3::ZERO,
-                Vec3::ZERO,
-                0.1..1e4,
-                60f32.to_radians(),
-            )),
-            speed: 1.0,
-            sensitivity: 0.5,
-        }
+        Self::new()
     }
 }
 
@@ -639,6 +1098,14 @@ pub enum CameraControl {
 }
 
 impl CameraControl {
+    /// Get the position.
+    pub fn pos(&self) -> Vec3 {
+        match self {
+            Self::FirstPerson(control) => control.pos,
+            Self::Orbit(control) => control.pos,
+        }
+    }
+
     /// Get the position mutably.
     pub fn pos_mut(&mut self) -> &mut Vec3 {
         match self {
@@ -730,11 +1197,6 @@ impl Measurement {
     /// Create a new measurement.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Get the visible hit pairs.
-    pub fn visible_hit_pairs(&self) -> impl Iterator<Item = &MeasurementHitPair> + '_ {
-        self.hit_pairs.iter().filter(|hit_pair| hit_pair.visible)
     }
 }
 

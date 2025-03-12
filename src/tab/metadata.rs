@@ -22,13 +22,15 @@ impl Tab for Metadata {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, state: &mut app::State) {
-        let (count, compressions, ui_builder) = match &state.gs {
+        let (file_name, count, compressions, ui_builder) = match &state.gs {
             app::Loadable::Loaded(gs) => (
-                gs.gaussians.gaussians.len(),
+                gs.selected_model().file_name.as_str(),
+                gs.selected_model().gaussians.gaussians.capacity(),
                 &gs.compressions,
                 egui::UiBuilder::new(),
             ),
             app::Loadable::Unloaded { .. } => (
+                "N/A",
                 0,
                 &app::Compressions::default(),
                 egui::UiBuilder::new().disabled(),
@@ -39,6 +41,10 @@ impl Tab for Metadata {
 
         ui.scope_builder(ui_builder, |ui| {
             egui::Grid::new("metadata_grid").show(ui, |ui| {
+                ui.label("Model File Name");
+                ui.label(file_name);
+                ui.end_row();
+
                 ui.label("Gaussian Count");
                 ui.label(count.to_formatted_string(&num_format::Locale::en));
                 ui.end_row();
@@ -55,7 +61,8 @@ impl Tab for Metadata {
                 ));
                 ui.end_row();
 
-                ui.label("SH Compression");
+                ui.label("SH Compression")
+                    .on_hover_text("Spherical harmonics compression");
                 ui.label(compressions.sh.to_string());
                 ui.end_row();
 

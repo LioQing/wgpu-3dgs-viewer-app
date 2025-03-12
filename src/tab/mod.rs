@@ -5,7 +5,8 @@ use strum::{EnumCount, EnumIter, IntoEnumIterator};
 mod camera;
 mod measurement;
 mod metadata;
-mod scene;
+mod models;
+pub mod scene;
 mod selection;
 mod transform;
 
@@ -13,6 +14,7 @@ use crate::app;
 use camera::Camera;
 use measurement::Measurement;
 use metadata::Metadata;
+use models::Models;
 use scene::Scene;
 use selection::Selection;
 use transform::Transform;
@@ -37,6 +39,7 @@ pub enum Type {
     Measurement,
     Selection,
     Metadata,
+    Models,
 }
 
 impl Type {
@@ -49,6 +52,7 @@ impl Type {
             Self::Measurement => "Measurement",
             Self::Selection => "Selection",
             Self::Metadata => "Metadata",
+            Self::Models => "Models",
         }
     }
 }
@@ -77,7 +81,7 @@ impl Manager {
         let [_, _] = dock_state.main_surface_mut().split_below(
             inspector,
             0.5,
-            vec![Type::Selection, Type::Measurement],
+            vec![Type::Models, Type::Selection, Type::Measurement],
         );
 
         let tabs = HashMap::new();
@@ -132,6 +136,12 @@ impl Manager {
                 self.dock_state.remove_tab(i);
             }
         }
+
+        ui.separator();
+
+        if ui.button("Reset Layout").clicked() {
+            *self = Self::new();
+        }
     }
 }
 
@@ -185,6 +195,7 @@ impl Viewer<'_> {
             Type::Measurement => Box::new(Measurement::create(self.state)) as Box<dyn Tab>,
             Type::Selection => Box::new(Selection::create(self.state)) as Box<dyn Tab>,
             Type::Metadata => Box::new(Metadata::create(self.state)) as Box<dyn Tab>,
+            Type::Models => Box::new(Models::create(self.state)) as Box<dyn Tab>,
         });
     }
 }

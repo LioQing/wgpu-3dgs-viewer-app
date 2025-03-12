@@ -130,26 +130,6 @@ impl Measurement {
         hit_pairs: &[app::MeasurementHitPair],
         camera: &gs::CameraBuffer,
     ) {
-        #[repr(C)]
-        #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-        struct HitPair {
-            hit_0: Vec3,
-            color: U8Vec4,
-            hit_1: Vec3,
-            line_width: f32,
-        }
-
-        impl From<app::MeasurementHitPair> for HitPair {
-            fn from(hit_pair: app::MeasurementHitPair) -> Self {
-                Self {
-                    hit_0: hit_pair.hits[0].pos,
-                    color: U8Vec4::from_array(hit_pair.color.to_array()),
-                    hit_1: hit_pair.hits[1].pos,
-                    line_width: hit_pair.line_width,
-                }
-            }
-        }
-
         self.hit_pairs_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Measurement Hit Pairs Buffer"),
             contents: bytemuck::cast_slice(
@@ -185,5 +165,25 @@ impl Measurement {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.draw(0..6, 0..hit_pair_count);
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct HitPair {
+    hit_0: Vec3,
+    color: U8Vec4,
+    hit_1: Vec3,
+    line_width: f32,
+}
+
+impl From<app::MeasurementHitPair> for HitPair {
+    fn from(hit_pair: app::MeasurementHitPair) -> Self {
+        Self {
+            hit_0: hit_pair.hits[0].pos,
+            color: U8Vec4::from_array(hit_pair.color.to_array()),
+            hit_1: hit_pair.hits[1].pos,
+            line_width: hit_pair.line_width,
+        }
     }
 }
