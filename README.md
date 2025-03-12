@@ -8,17 +8,30 @@
 
 This viewer app is built for [3D Gaussian Splatting](https://en.wikipedia.org/wiki/Gaussian_splatting). It supports the PLY file format from the [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) research paper.
 
-The app uses [WebGPU](https://en.wikipedia.org/wiki/WebGPU) to render the model, so it supports most of the GPU backends.
+The viewer implementation can be found at [wgpu-3dgs-viewer](https://github.com/LioQing/wgpu-3dgs-viewer). The app uses [wgpu](https://wgpu.rs/), the Rust implementation of [WebGPU](https://en.wikipedia.org/wiki/WebGPU), to render the model, so it supports most of the GPU backends.
 
 > [!NOTE]
 >
 > To use the web version, you need a browser that supports WebGPU. Please refer to the [WebGPU Implementation Status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) for more information.
+>
+> You may also run the app natively, see [Native](#native) below.
 
 ### Running the app
 
-You can run the app on the web by visiting [lioqing.com/wgpu-3dgs-viewer-app/](https://lioqing.com/wgpu-3dgs-viewer-app/).
+#### Web
 
-You may also run the app natively by building it from source.
+You can run the app on the web by visiting [https://lioqing.com/wgpu-3dgs-viewer-app/](https://lioqing.com/wgpu-3dgs-viewer-app/).
+
+#### Native
+
+You can run the app natively, by downloading from the latest release from the [releases page](https://github.com/LioQing/wgpu-3dgs-viewer-app/releases) depending on your operating system.
+
+### Features
+
+- Load large PLY files at very fast speed.
+- Render multiple models at once.
+- Edit the model's transform and colors.
+- Point and click measurement tool.
 
 ### Demo
 
