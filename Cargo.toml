@@ -21,7 +21,7 @@ strum = { version = "0.26", features = ["derive"] }
 glam = { version = "0.29.2", features = ["bytemuck"] }
 itertools = "0.14.0"
 rfd = "0.15.2"
-wgpu-3dgs-viewer = { path = "../wgpu-3dgs-viewer", features = [
+wgpu-3dgs-viewer = { git = "https://github.com/LioQing/wgpu-3dgs-viewer.git", features = [
     "query-toolset",
     "query-texture-overlay",
     "query-cursor",
@@ -32,6 +32,7 @@ oneshot = "0.1.9"
 paste = "1.0.15"
 num-format = "0.4.4"
 zip = { version = "2.2.3", default-features = false, features = ["deflate"] }
+chrono = "0.4.40"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -46,6 +47,7 @@ eframe = { version = "0.31", default-features = false, features = [
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3.0", features = ["futures"] }
 wasm-bindgen-futures = "0.4.50"
 web-sys = "0.3.70" # to access the DOM (to hide the loading text)
 eframe = { version = "0.31", default-features = false, features = [

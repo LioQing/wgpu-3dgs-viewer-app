@@ -195,8 +195,8 @@ impl Scene {
                             true => "Unnamed".to_string(),
                             false => file.file_name().trim().to_string(),
                         };
-                        let mut reader = Cursor::new(file.read().await);
-                        let gs = app::GaussianSplatting::new(filename, &mut reader, compressions)
+                        let reader = Cursor::new(file.read().await);
+                        let gs = app::GaussianSplatting::new(filename, reader, compressions)
                             .map_err(|e| e.to_string());
 
                         tx.send(gs).expect("send gs");
@@ -226,7 +226,7 @@ impl Scene {
                                 true => "Unnamed".to_string(),
                                 false => file.name.trim().to_string(),
                             },
-                            &mut Cursor::new(file.bytes.as_ref().expect("file bytes").to_vec()),
+                            Cursor::new(file.bytes.as_ref().expect("file bytes").clone()),
                             compressions.clone(),
                         )
                         .map_err(|e| e.to_string()),
@@ -239,7 +239,7 @@ impl Scene {
                                         true => "Unnamed".to_string(),
                                         false => file.name.trim().to_string(),
                                     },
-                                    &mut Cursor::new(data),
+                                    Cursor::new(data),
                                     compressions.clone(),
                                 )
                                 .map_err(|e| e.to_string())
@@ -269,6 +269,37 @@ impl Scene {
         gs: &mut app::GaussianSplatting,
     ) -> bool {
         let mut loaded = true;
+
+        // Loading bar
+        if let Some((loading, ..)) = &gs.model_loader {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::default());
+
+                ui.label(format!("Loading: {loading}"));
+
+                ui.separator();
+
+                let model = gs.models.get(loading).expect("model");
+                let progress = model.gaussians.gaussians.len() as f32
+                    / model.gaussians.gaussians.capacity() as f32;
+
+                ui.add(egui::ProgressBar::new(progress).text(format!(
+                        "{} / {}",
+                        model
+                            .gaussians
+                            .gaussians
+                            .len()
+                            .to_formatted_string(&num_format::Locale::en),
+                        model
+                            .gaussians
+                            .gaussians
+                            .capacity()
+                            .to_formatted_string(&num_format::Locale::en),
+                    )));
+            });
+
+            ui.separator();
+        }
 
         // UI
         ui.horizontal(|ui| {
@@ -300,41 +331,96 @@ impl Scene {
                 self.fps = 1.0 / dt;
             }
 
-            ui.label(format!("🏃 FPS: {:.2}", self.fps));
+            ui.label("🏃 FPS:");
+            ui.add(egui::Label::new(
+                egui::RichText::new(format!("{:<5.1}", self.fps)).monospace(),
+            ));
         });
 
-        // Scene
+        // Check for loading model
+        if let Some((loading, rx)) = &gs.model_loader {
+            let timer = chrono::Local::now();
+
+            let model = gs.models.get_mut(loading).expect("model");
+            let mut new_count = 0;
+
+            for gaussian in rx.try_iter() {
+                match gaussian {
+                    Ok(gaussian) => {
+                        model.gaussians.gaussians.push(gaussian);
+                        new_count += 1;
+                    }
+                    Err(e) => {
+                        log::error!("Error loading gaussian: {e}");
+                    }
+                }
+
+                const BATCH_SIZE: usize = 1000;
+                const MAX_TIME: f32 = 0.06;
+                if new_count % BATCH_SIZE == 0
+                    && (chrono::Local::now() - timer).num_milliseconds() as f32 / 100.0 > MAX_TIME
+                {
+                    break;
+                }
+            }
+
+            let start = model.gaussians.gaussians.len() - new_count;
+            apply_to_scene_resource!(frame, gs.compressions, |res| {
+                res.load_model(
+                    frame.wgpu_render_state().expect("render state"),
+                    &loading,
+                    start,
+                    &model.gaussians.gaussians[start..],
+                )
+            });
+
+            if model.gaussians.gaussians.len() == model.gaussians.gaussians.capacity() {
+                gs.model_loader = None;
+            }
+        }
 
         // Receive scene commands
         for command in gs.scene_rx.try_iter() {
             match command {
-                app::SceneCommand::AddModel(result) => match result {
-                    Ok(mut model) => {
-                        let mut i = 0;
-                        let mut new_file_name = model.file_name.clone();
-                        while gs.models.contains_key(&new_file_name) {
-                            i += 1;
-                            new_file_name = format!("{} ({})", model.file_name, i);
+                app::SceneCommand::AddModel { file_name, reader } => {
+                    let mut i = 0;
+                    let mut new_file_name = file_name.clone();
+                    while gs.models.contains_key(&new_file_name) {
+                        i += 1;
+                        new_file_name = format!("{} ({})", file_name, i);
+                    }
+
+                    let file_name = new_file_name;
+
+                    if let Some((other, ..)) = &gs.model_loader {
+                        log::error!("Model loader is already running for {other}");
+                        continue;
+                    }
+
+                    let (count, gaussian_rx) = match app::GaussianSplattingModel::init_load(reader)
+                    {
+                        Ok((count, rx)) => (count, rx),
+                        Err(e) => {
+                            log::error!("Error loading model: {e}");
+                            continue;
                         }
+                    };
+                    let model = app::GaussianSplattingModel::new(file_name.clone(), count);
 
-                        model.file_name = new_file_name;
+                    gs.model_loader = Some((file_name.clone(), gaussian_rx));
 
-                        log::debug!("Additional model loaded: {}", model.file_name);
+                    log::debug!("Additional model loaded: {file_name}");
 
-                        apply_to_scene_resource!(frame, gs.compressions, |res| {
-                            res.insert_model(
-                                frame.wgpu_render_state().expect("render state"),
-                                model.file_name.to_string(),
-                                &model.gaussians,
-                            )
-                        });
+                    apply_to_scene_resource!(frame, gs.compressions, |res| {
+                        res.add_model(
+                            frame.wgpu_render_state().expect("render state"),
+                            file_name.clone(),
+                            count,
+                        )
+                    });
 
-                        gs.models.insert(model.file_name.to_string(), model);
-                    }
-                    Err(err) => {
-                        log::error!("Error loading additional model: {err}");
-                    }
-                },
+                    gs.models.insert(file_name, model);
+                }
                 app::SceneCommand::RemoveModel(key) => {
                     if gs.models.len() == 1 && gs.models.contains_key(&key) {
                         loaded = false;
@@ -361,6 +447,7 @@ impl Scene {
             }
         }
 
+        // Viewport
         egui::Frame::canvas(ui.style()).show(ui, |ui| {
             macro_rules! case {
                 ($sh:ident, $cov3d:ident) => {
@@ -789,7 +876,7 @@ impl Scene {
                         ui.label("N/A");
                         ui.label(util::human_readable_size(
                             std::mem::size_of::<Vec3>()
-                                * gs.selected_model().gaussians.gaussians.len(),
+                                * gs.selected_model().gaussians.gaussians.capacity(),
                         ));
                         ui.end_row();
 
@@ -797,7 +884,7 @@ impl Scene {
                         ui.label("N/A");
                         ui.label(util::human_readable_size(
                             std::mem::size_of::<U8Vec4>()
-                                * gs.selected_model().gaussians.gaussians.len(),
+                                * gs.selected_model().gaussians.gaussians.capacity(),
                         ));
                         ui.end_row();
 
@@ -826,7 +913,7 @@ impl Scene {
                                 app::ShCompression::Remove => std::mem::size_of::<
                                     <gs::GaussianShNoneConfig as gs::GaussianShConfig>::Field,
                                 >(),
-                            } * gs.selected_model().gaussians.gaussians.len(),
+                            } * gs.selected_model().gaussians.gaussians.capacity(),
                         ));
                         ui.end_row();
 
@@ -855,7 +942,7 @@ impl Scene {
                                     <gs::GaussianCov3dHalfConfig as gs::GaussianCov3dConfig>
                                         ::Field,
                                 >(),
-                            } * gs.selected_model().gaussians.gaussians.len(),
+                            } * gs.selected_model().gaussians.gaussians.capacity(),
                         ));
                         ui.end_row();
                     });
@@ -867,21 +954,22 @@ impl Scene {
                     gs.selected_model()
                         .gaussians
                         .gaussians
-                        .len()
+                        .capacity()
                         .to_formatted_string(&num_format::Locale::en)
                 ));
 
                 ui.label(format!(
                     "Original Size: {}",
                     util::human_readable_size(
-                        gs.selected_model().gaussians.gaussians.len()
+                        gs.selected_model().gaussians.gaussians.capacity()
                             * std::mem::size_of::<gs::PlyGaussianPod>()
                     )
                 ));
                 ui.label(format!(
                     "Compressed Size: {}",
                     util::human_readable_size(
-                        compressions.compressed_size(gs.selected_model().gaussians.gaussians.len())
+                        compressions
+                            .compressed_size(gs.selected_model().gaussians.gaussians.capacity())
                     )
                 ));
                 ui.label("");
@@ -911,7 +999,7 @@ impl Scene {
                                         >::new(
                                             $frame.wgpu_render_state().expect("render state"),
                                             $gs.selected_model().file_name.clone(),
-                                            &$gs.selected_model().gaussians,
+                                            $gs.selected_model().gaussians.gaussians.capacity(),
                                         ))
                                 }
                             };
@@ -1716,7 +1804,7 @@ pub struct SceneResource<G: gs::GaussianPod> {
 
 impl<G: gs::GaussianPod> SceneResource<G> {
     /// Create a new scene resource.
-    fn new(render_state: &egui_wgpu::RenderState, key: String, gaussians: &gs::Gaussians) -> Self {
+    fn new(render_state: &egui_wgpu::RenderState, key: String, count: usize) -> Self {
         log::debug!("Creating viewer");
         // In WASM, the viewer is not Send nor Sync, but in native, it is.
         #[allow(clippy::arc_with_non_send_sync)]
@@ -1728,7 +1816,8 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         )));
 
         let mut locked_viewer = viewer.lock().expect("viewer");
-        locked_viewer.insert_model(&render_state.device, key, gaussians);
+
+        Self::add_model_with_viewer(&mut locked_viewer, render_state, key, count);
 
         log::debug!("Creating measurement renderer");
         let measurement_renderer = renderer::Measurement::new(
@@ -1776,24 +1865,55 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         }
     }
 
-    /// Insert a new model.
-    fn insert_model(
+    /// Load Gaussians for a model.
+    fn load_model(
         &mut self,
         render_state: &egui_wgpu::RenderState,
-        key: String,
-        model: &gs::Gaussians,
+        key: &str,
+        start: usize,
+        gaussians: &[gs::Gaussian],
     ) {
         self.viewer
             .lock()
             .expect("viewer")
-            .insert_model(&render_state.device, key.clone(), model);
+            .models
+            .get(key)
+            .expect("model")
+            .gaussian_buffers
+            .gaussians_buffer
+            .update_range(&render_state.queue, start, gaussians);
+    }
 
-        self.viewer.lock().expect("viewer").update_model_transform(
-            &render_state.queue,
-            &key,
-            Vec3::ZERO,
-            Quat::from_axis_angle(Vec3::Z, 180.0f32.to_radians()),
-            Vec3::ONE,
+    /// Add a new model.
+    fn add_model(&mut self, render_state: &egui_wgpu::RenderState, key: String, count: usize) {
+        let mut viewer = self.viewer.lock().expect("viewer");
+        Self::add_model_with_viewer(&mut viewer, render_state, key, count);
+    }
+
+    /// Add a new model with a viewer.
+    fn add_model_with_viewer(
+        viewer: &mut gs::MultiModelViewer<G>,
+        render_state: &egui_wgpu::RenderState,
+        key: String,
+        count: usize,
+    ) {
+        let gaussian_buffers =
+            gs::MultiModelViewerGaussianBuffers::new_empty(&render_state.device, count);
+        let bind_groups = gs::MultiModelViewerBindGroups::new(
+            &render_state.device,
+            &viewer.preprocessor,
+            &viewer.radix_sorter,
+            &viewer.renderer,
+            &viewer.postprocessor,
+            &gaussian_buffers,
+            &viewer.world_buffers,
+        );
+        viewer.models.insert(
+            key,
+            gs::MultiModelViewerModel {
+                gaussian_buffers,
+                bind_groups,
+            },
         );
     }
 
@@ -1820,11 +1940,6 @@ impl<G: gs::GaussianPod> SceneResource<G> {
 }
 
 /// The scene callback.
-///
-/// This stores cheap cloneable data for the scene callback, all expensive data should be stored in
-/// the [`SceneResource`] and updated with [`apply_to_scene_resource`]. The rationale is that
-/// data stored in [`SceneResource`] would need to be memoized in some way, which adds complexity
-/// to the code for rather cheap data.
 struct SceneCallback<G: gs::GaussianPod + Send + Sync> {
     /// The model render keys.
     model_render_keys: Vec<String>,

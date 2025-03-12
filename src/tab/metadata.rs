@@ -25,7 +25,7 @@ impl Tab for Metadata {
         let (file_name, count, compressions, ui_builder) = match &state.gs {
             app::Loadable::Loaded(gs) => (
                 gs.selected_model().file_name.as_str(),
-                gs.selected_model().gaussians.gaussians.len(),
+                gs.selected_model().gaussians.gaussians.capacity(),
                 &gs.compressions,
                 egui::UiBuilder::new(),
             ),
