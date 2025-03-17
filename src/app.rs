@@ -908,6 +908,7 @@ impl GaussianSplattingModel {
                     for g in iter {
                         if let Err(err) = tx.send(g.map(gs::Gaussian::from)) {
                             log::error!("Send error: {err}");
+                            return;
                         }
                     }
 
@@ -918,6 +919,7 @@ impl GaussianSplattingModel {
                             for g in chunk {
                                 if let Err(err) = tx.send(g.map(gs::Gaussian::from)) {
                                     log::error!("Send error: {err}");
+                                    return;
                                 }
                             }
 
@@ -1281,6 +1283,9 @@ pub struct Selection {
 
     /// The edit.
     pub edit: Option<SelectionEdit>,
+
+    /// Whether to show unedited.
+    pub show_unedited: bool,
 }
 
 impl Selection {
@@ -1293,6 +1298,7 @@ impl Selection {
             brush_radius: 40,
             highlight_color: egui::Color32::from_rgba_unmultiplied(255, 0, 255, 127),
             edit: None,
+            show_unedited: false,
         }
     }
 }

@@ -705,11 +705,17 @@ impl Scene {
             query_toolset,
             query_texture_overlay,
             query_cursor,
+            unedited_models,
+            show_unedited_model,
             ..
         } = renderer
             .callback_resources
             .get_mut()
             .expect("scene resource");
+
+        // Update whether the unedited model is shown, otherwise edited model will be shown.
+        *show_unedited_model = gs.selection.show_unedited;
+
         let mut viewer = viewer.lock().expect("viewer");
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Preprocess Encoder"),
@@ -792,6 +798,7 @@ impl Scene {
                     Some(edit) => {
                         viewer.update_selection_edit_with_pod(queue, &edit.to_pod());
                         viewer.update_selection_highlight(queue, vec4(0.0, 0.0, 0.0, 0.0));
+                        *show_unedited_model = false;
                     }
                     None => {
                         viewer
@@ -823,10 +830,14 @@ impl Scene {
         // Preprocesses.
         for key in gs.models.iter().filter(|(_, m)| m.visible).map(|(k, _)| k) {
             let model = &viewer.models.get(key).expect("model");
+            let unedited_model = unedited_models.get(key).expect("unedited model");
 
             viewer.preprocessor.preprocess(
                 &mut encoder,
-                &model.bind_groups.preprocessor,
+                match show_unedited_model {
+                    true => &unedited_model.preprocessor_bind_group,
+                    false => &model.bind_groups.preprocessor,
+                },
                 model.gaussian_buffers.gaussians_buffer.len() as u32,
             );
 
@@ -1773,6 +1784,75 @@ enum SceneInputWebEvent {
     PointerLockChange(bool),
 }
 
+/// The buffer and bind groups for showing unedited model.
+///
+/// Not really a model, but data for showing unedited version of the actual model.
+#[derive(Debug)]
+pub struct UneditedModel {
+    #[allow(dead_code)]
+    /// The unedited Gaussian edit buffer.
+    pub gaussians_edit_buffer: gs::GaussiansEditBuffer,
+
+    /// The preprocessor bind group.
+    pub preprocessor_bind_group: wgpu::BindGroup,
+
+    /// The renderer bind group.
+    pub renderer_bind_group: wgpu::BindGroup,
+}
+
+impl UneditedModel {
+    /// Create a new unedited model.
+    fn new<G: gs::GaussianPod>(
+        viewer: &mut gs::MultiModelViewer<G>,
+        render_state: &egui_wgpu::RenderState,
+        gaussian_buffers: &gs::MultiModelViewerGaussianBuffers<G>,
+    ) -> Self {
+        let gaussians_edit_buffer = gs::GaussiansEditBuffer::new(
+            &render_state.device,
+            gaussian_buffers.gaussians_buffer.len() as u32,
+        );
+
+        let preprocessor_bind_group = viewer.preprocessor.create_bind_group(
+            &render_state.device,
+            &viewer.world_buffers.camera_buffer,
+            &gaussian_buffers.model_transform_buffer,
+            &gaussian_buffers.gaussians_buffer,
+            &gaussian_buffers.indirect_args_buffer,
+            &gaussian_buffers.radix_sort_indirect_args_buffer,
+            &gaussian_buffers.indirect_indices_buffer,
+            &gaussian_buffers.gaussians_depth_buffer,
+            &viewer.world_buffers.query_buffer,
+            &gaussian_buffers.query_result_count_buffer,
+            &gaussian_buffers.query_results_buffer,
+            &gaussians_edit_buffer,
+            &gaussian_buffers.selection_buffer,
+            &viewer.world_buffers.selection_edit_buffer,
+            &viewer.world_buffers.query_texture,
+        );
+
+        let renderer_bind_group = viewer.renderer.create_bind_group(
+            &render_state.device,
+            &viewer.world_buffers.camera_buffer,
+            &gaussian_buffers.model_transform_buffer,
+            &viewer.world_buffers.gaussian_transform_buffer,
+            &gaussian_buffers.gaussians_buffer,
+            &gaussian_buffers.indirect_indices_buffer,
+            &viewer.world_buffers.query_buffer,
+            &gaussian_buffers.query_result_count_buffer,
+            &gaussian_buffers.query_results_buffer,
+            &viewer.world_buffers.selection_highlight_buffer,
+            &gaussian_buffers.selection_buffer,
+            &gaussians_edit_buffer,
+        );
+
+        Self {
+            gaussians_edit_buffer,
+            preprocessor_bind_group,
+            renderer_bind_group,
+        }
+    }
+}
+
 /// The scene resource.
 ///
 /// This is for the [`SceneCallback`].
@@ -1800,6 +1880,15 @@ pub struct SceneResource<G: gs::GaussianPod> {
 
     /// The query cursor.
     pub query_cursor: gs::QueryCursor,
+
+    /// The unedited models, that is, unedited.
+    pub unedited_models: HashMap<String, UneditedModel>,
+
+    /// Whether the unedited model is shown, compared to the edited model.
+    ///
+    /// This is updated by [`Scene::loaded_preprocess`] so that [`SceneCallback`] can know whether
+    /// to use this.
+    pub show_unedited_model: bool,
 }
 
 impl<G: gs::GaussianPod> SceneResource<G> {
@@ -1816,8 +1905,6 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         )));
 
         let mut locked_viewer = viewer.lock().expect("viewer");
-
-        Self::add_model_with_viewer(&mut locked_viewer, render_state, key, count);
 
         log::debug!("Creating measurement renderer");
         let measurement_renderer = renderer::Measurement::new(
@@ -1851,6 +1938,18 @@ impl<G: gs::GaussianPod> SceneResource<G> {
             &locked_viewer.world_buffers.camera_buffer,
         );
 
+        log::debug!("Creating unedited models");
+        let mut unedited_models = HashMap::new();
+
+        log::debug!("Initializing first model");
+        Self::add_model_with_viewer(
+            &mut locked_viewer,
+            &mut unedited_models,
+            render_state,
+            key,
+            count,
+        );
+
         std::mem::drop(locked_viewer);
 
         log::info!("Scene loaded");
@@ -1862,6 +1961,8 @@ impl<G: gs::GaussianPod> SceneResource<G> {
             query_toolset,
             query_texture_overlay,
             query_cursor,
+            unedited_models,
+            show_unedited_model: false,
         }
     }
 
@@ -1887,12 +1988,19 @@ impl<G: gs::GaussianPod> SceneResource<G> {
     /// Add a new model.
     fn add_model(&mut self, render_state: &egui_wgpu::RenderState, key: String, count: usize) {
         let mut viewer = self.viewer.lock().expect("viewer");
-        Self::add_model_with_viewer(&mut viewer, render_state, key, count);
+        Self::add_model_with_viewer(
+            &mut viewer,
+            &mut self.unedited_models,
+            render_state,
+            key,
+            count,
+        );
     }
 
     /// Add a new model with a viewer.
     fn add_model_with_viewer(
         viewer: &mut gs::MultiModelViewer<G>,
+        unedited_models: &mut HashMap<String, UneditedModel>,
         render_state: &egui_wgpu::RenderState,
         key: String,
         count: usize,
@@ -1908,13 +2016,16 @@ impl<G: gs::GaussianPod> SceneResource<G> {
             &gaussian_buffers,
             &viewer.world_buffers,
         );
+        let unedited_model = UneditedModel::new(viewer, render_state, &gaussian_buffers);
+
         viewer.models.insert(
-            key,
+            key.clone(),
             gs::MultiModelViewerModel {
                 gaussian_buffers,
                 bind_groups,
             },
         );
+        unedited_models.insert(key, unedited_model);
     }
 
     /// Remove a model.
@@ -1965,6 +2076,8 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
             query_toolset,
             query_texture_overlay,
             query_cursor,
+            unedited_models,
+            show_unedited_model,
             ..
         } = callback_resources.get().expect("scene resource");
 
@@ -1973,10 +2086,14 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
 
             for key in self.model_render_keys.iter() {
                 let model = &viewer.models.get(key).expect("model");
+                let unedited_model = unedited_models.get(key).expect("unedited model");
 
                 viewer.renderer.render_with_pass(
                     render_pass,
-                    &model.bind_groups.renderer,
+                    match show_unedited_model {
+                        true => &unedited_model.renderer_bind_group,
+                        false => &model.bind_groups.renderer,
+                    },
                     &model.gaussian_buffers.indirect_args_buffer,
                 );
             }

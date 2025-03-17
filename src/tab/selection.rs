@@ -1,7 +1,7 @@
 use glam::*;
 use wgpu_3dgs_viewer as gs;
 
-use crate::app;
+use crate::{app, util};
 
 use super::Tab;
 
@@ -76,7 +76,7 @@ impl Tab for Selection {
 
                 ui.label("Immediate Mode")
                     .on_hover_text("The selection is immediately applied while dragging");
-                ui.checkbox(&mut selection.immediate, "");
+                ui.add(util::toggle(&mut selection.immediate));
                 ui.end_row();
 
                 ui.label("Highlight Color");
@@ -88,6 +88,14 @@ impl Tab for Selection {
                     ui.add(egui::Slider::new(&mut selection.brush_radius, 1..=100).integer());
                     ui.end_row();
                 }
+
+                ui.label("Show Unedited")
+                    .on_hover_text("Show the model without any edits");
+                ui.add(util::toggle(&mut selection.show_unedited));
+                if selection.show_unedited {
+                    selection.edit = None;
+                }
+                ui.end_row();
             });
 
             ui.horizontal(|ui| {
@@ -105,21 +113,23 @@ impl Tab for Selection {
                     }
                 }
 
-                let mut editing = selection.edit.is_some();
-                if ui
-                    .checkbox(&mut editing, "Edit")
-                    .on_hover_text("When editing, selected Gaussians are not highlighted")
-                    .changed()
-                {
-                    if editing {
-                        selection.edit = Some(app::SelectionEdit::default());
-                    } else {
-                        selection.edit = None;
+                match selection.edit {
+                    Some(..) => {
+                        if ui.button("Editing...").clicked() {
+                            selection.edit = None;
+                        }
+                    }
+                    _ => {
+                        if ui.button("Edit").clicked() {
+                            selection.edit = Some(app::SelectionEdit::default());
+                        }
                     }
                 }
             });
 
             if let Some(edit) = &mut selection.edit {
+                selection.show_unedited = false;
+
                 if ui.button("Reset Parameters").clicked() {
                     *edit = app::SelectionEdit::default();
                 }
