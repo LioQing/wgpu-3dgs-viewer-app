@@ -1,12 +1,29 @@
 use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Execute a task on a background thread.
 pub fn exec_task(f: impl Future<Output = ()> + std::marker::Send + 'static) {
     std::thread::spawn(move || futures::executor::block_on(f));
 }
 
 #[cfg(target_arch = "wasm32")]
+/// Execute a task on a background thread.
 pub fn exec_task(f: impl Future<Output = ()> + 'static) {
+    wasm_bindgen_futures::spawn_local(f);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Execute a blocking task on a background thread.
+pub fn exec_blocking_task(f: impl Future<Output = ()> + 'static) {
+    futures::executor::block_on(f);
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Execute a blocking task on a background thread.
+///
+/// Note: this function does the same thing as [`exec_task`] on the web,
+/// because browsers cannot run blocking code.
+pub fn exec_blocking_task(f: impl Future<Output = ()> + 'static) {
     wasm_bindgen_futures::spawn_local(f);
 }
 

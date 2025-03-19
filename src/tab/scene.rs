@@ -637,7 +637,7 @@ impl Scene {
                         .query_results_buffer
                         .clone();
 
-                    util::exec_task(async move {
+                    util::exec_blocking_task(async move {
                         let mut results =
                             gs::query::download(&device, &queue, &count_buffer, &results_buffer)
                                 .await
@@ -713,9 +713,6 @@ impl Scene {
             .get_mut()
             .expect("scene resource");
 
-        // Update whether the unedited model is shown, otherwise edited model will be shown.
-        *show_unedited_model = gs.selection.show_unedited;
-
         let mut viewer = viewer.lock().expect("viewer");
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Preprocess Encoder"),
@@ -732,6 +729,14 @@ impl Scene {
                 viewer.update_query_texture_size(device, viewer_size);
                 query_texture_overlay
                     .update_bind_group(device, &viewer.world_buffers.query_texture);
+
+                for (key, model) in unedited_models.iter_mut() {
+                    model.update_bind_group(
+                        device,
+                        &viewer,
+                        &viewer.models.get(key).expect("model").gaussian_buffers,
+                    );
+                }
             }
 
             // Handle new query.
@@ -798,7 +803,7 @@ impl Scene {
                     Some(edit) => {
                         viewer.update_selection_edit_with_pod(queue, &edit.to_pod());
                         viewer.update_selection_highlight(queue, vec4(0.0, 0.0, 0.0, 0.0));
-                        *show_unedited_model = false;
+                        gs.selection.show_unedited = false;
                     }
                     None => {
                         viewer
@@ -825,6 +830,11 @@ impl Scene {
                     &viewer.world_buffers.camera_buffer,
                 );
             }
+        }
+
+        *show_unedited_model = gs.selection.show_unedited;
+        if *show_unedited_model {
+            viewer.update_selection_edit_with_pod(queue, &gs::GaussianEditPod::default());
         }
 
         // Preprocesses.
@@ -1789,7 +1799,6 @@ enum SceneInputWebEvent {
 /// Not really a model, but data for showing unedited version of the actual model.
 #[derive(Debug)]
 pub struct UneditedModel {
-    #[allow(dead_code)]
     /// The unedited Gaussian edit buffer.
     pub gaussians_edit_buffer: gs::GaussiansEditBuffer,
 
@@ -1803,7 +1812,7 @@ pub struct UneditedModel {
 impl UneditedModel {
     /// Create a new unedited model.
     fn new<G: gs::GaussianPod>(
-        viewer: &mut gs::MultiModelViewer<G>,
+        viewer: &gs::MultiModelViewer<G>,
         render_state: &egui_wgpu::RenderState,
         gaussian_buffers: &gs::MultiModelViewerGaussianBuffers<G>,
     ) -> Self {
@@ -1850,6 +1859,34 @@ impl UneditedModel {
             preprocessor_bind_group,
             renderer_bind_group,
         }
+    }
+
+    /// Update the bind group.
+    ///
+    /// This is for when query texture is updated.
+    fn update_bind_group<G: gs::GaussianPod>(
+        &mut self,
+        device: &wgpu::Device,
+        viewer: &gs::MultiModelViewer<G>,
+        gaussian_buffers: &gs::MultiModelViewerGaussianBuffers<G>,
+    ) {
+        self.preprocessor_bind_group = viewer.preprocessor.create_bind_group(
+            device,
+            &viewer.world_buffers.camera_buffer,
+            &gaussian_buffers.model_transform_buffer,
+            &gaussian_buffers.gaussians_buffer,
+            &gaussian_buffers.indirect_args_buffer,
+            &gaussian_buffers.radix_sort_indirect_args_buffer,
+            &gaussian_buffers.indirect_indices_buffer,
+            &gaussian_buffers.gaussians_depth_buffer,
+            &viewer.world_buffers.query_buffer,
+            &gaussian_buffers.query_result_count_buffer,
+            &gaussian_buffers.query_results_buffer,
+            &self.gaussians_edit_buffer,
+            &gaussian_buffers.selection_buffer,
+            &viewer.world_buffers.selection_edit_buffer,
+            &viewer.world_buffers.query_texture,
+        );
     }
 }
 
