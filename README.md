@@ -29,13 +29,48 @@ You can run the app natively, by downloading from the latest release from the [r
 ### Features
 
 - Load large PLY files at very fast speed.
+- Different Gaussian display modes.
 - Render multiple models at once.
 - Edit the model's transform and colors.
-- Point and click measurement tool.
+- Mask the model with composite shapes.
 
 ### Demo
 
-https://github.com/user-attachments/assets/63275b41-ba1e-4c71-aae0-c43e514eac0c
+The following demos are recorded on laptop with:
+
+- CPU: AMD Ryzen 9 4900HS
+- GPU: NVIDIA GeForce RTX 2060 with Max-Q Design
+- RAM: 32 GB
+
+#### Compression & Loading
+
+Models are compressed and loaded while being streamed from the file at a very fast speed.
+
+https://github.com/user-attachments/assets/9f3ba3de-e7b9-4a86-baae-98574a93a21f
+
+#### Display Mode
+
+Gaussians can be viewed as ellipses or points, with specified spherical harmonic degrees, and at different sizes.
+
+https://github.com/user-attachments/assets/bfc36e2a-0939-4703-af47-3c958556770a
+
+#### Multiple Models
+
+Multiple models can be loaded to be viewed in the same scene.
+
+https://github.com/user-attachments/assets/45e05ed1-ad93-44ea-9213-5218748cd26e
+
+#### Selection & Editing
+
+Gaussians can be selected using various tools and be used for color editing.
+
+https://github.com/user-attachments/assets/5a2ef198-f8a3-43db-94ff-9e393041bf1e
+
+#### Composite Mask
+
+Masks can be used to select Gaussians to view, which can be composed using set operations.
+
+https://github.com/user-attachments/assets/3ec2a95f-291b-4684-9023-94a57d8c3b2a
 
 ## Development
 
