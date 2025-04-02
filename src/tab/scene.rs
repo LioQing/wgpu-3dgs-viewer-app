@@ -444,6 +444,16 @@ impl Scene {
                         res.update_measurement_visible_hit_pairs(&gs.measurement.hit_pairs)
                     });
                 }
+                app::SceneCommand::EvaluateMask(op) => {
+                    apply_to_scene_resource!(frame, gs.compressions, |res| {
+                        res.evaluate_mask(
+                            frame.wgpu_render_state().expect("render state"),
+                            op.as_ref(),
+                            &gs.selected_model_key,
+                            gs.selected_model(),
+                        );
+                    });
+                }
             }
         }
 
@@ -648,11 +658,12 @@ impl Scene {
 
                         let pos = match hit_method {
                             app::MeasurementHitMethod::MostAlpha => {
-                                gs::query::hit_pos_by_most_alpha(
+                                gs::query::hit_pos_by_alpha_range(
                                     &pod,
                                     &mut results,
                                     &camera,
                                     viewer_size,
+                                    0.05,
                                 )
                                 .map(|(_, _, pos)| pos)
                                 .unwrap_or(Vec3::ZERO)
@@ -1837,6 +1848,7 @@ impl UneditedModel {
             &gaussian_buffers.selection_buffer,
             &viewer.world_buffers.selection_edit_buffer,
             &viewer.world_buffers.query_texture,
+            &gaussian_buffers.mask_buffer,
         );
 
         let renderer_bind_group = viewer.renderer.create_bind_group(
@@ -1886,8 +1898,22 @@ impl UneditedModel {
             &gaussian_buffers.selection_buffer,
             &viewer.world_buffers.selection_edit_buffer,
             &viewer.world_buffers.query_texture,
+            &gaussian_buffers.mask_buffer,
         );
     }
+}
+
+/// The mask gizmos resource for [`SceneResource`].
+#[derive(Debug)]
+pub struct MaskGizmosResource {
+    /// The gizmo.
+    pub gizmo: gs::MaskGizmo,
+
+    /// The box gizmos.
+    pub box_gizmos: Vec<gs::MaskGizmoPod>,
+
+    /// The sphere gizmos.
+    pub ellipsoid_gizmos: Vec<gs::MaskGizmoPod>,
 }
 
 /// The scene resource.
@@ -1926,6 +1952,12 @@ pub struct SceneResource<G: gs::GaussianPod> {
     /// This is updated by [`Scene::loaded_preprocess`] so that [`SceneCallback`] can know whether
     /// to use this.
     pub show_unedited_model: bool,
+
+    /// The mask evaluator.
+    pub mask_evaluator: gs::MaskEvaluator,
+
+    /// The mask gizmos.
+    pub mask_gizmos: HashMap<String, MaskGizmosResource>,
 }
 
 impl<G: gs::GaussianPod> SceneResource<G> {
@@ -1937,7 +1969,13 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         let viewer = Arc::new(Mutex::new(gs::MultiModelViewer::new_with(
             &render_state.device,
             render_state.target_format,
-            None,
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             uvec2(1, 1),
         )));
 
@@ -1962,27 +2000,49 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         };
 
         log::debug!("Creating query texture overlay");
-        let query_texture_overlay = gs::QueryTextureOverlay::new(
+        let query_texture_overlay = gs::QueryTextureOverlay::new_with(
             &render_state.device,
             render_state.target_format,
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             &locked_viewer.world_buffers.query_texture,
         );
 
         log::debug!("Creating query cursor");
-        let query_cursor = gs::QueryCursor::new(
+        let query_cursor = gs::QueryCursor::new_with(
             &render_state.device,
             render_state.target_format,
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             &locked_viewer.world_buffers.camera_buffer,
         );
 
         log::debug!("Creating unedited models");
         let mut unedited_models = HashMap::new();
 
+        log::debug!("Creating mask evaluator");
+        let mask_evaluator = gs::MaskEvaluator::new::<G>(&render_state.device);
+
+        log::debug!("Creating mask gizmos");
+        let mut mask_gizmos = HashMap::new();
+
         log::debug!("Initializing first model");
         Self::add_model_with_viewer(
             &mut locked_viewer,
             &mut unedited_models,
+            &mut mask_gizmos,
             render_state,
+            &mask_evaluator,
             key,
             count,
         );
@@ -2000,6 +2060,8 @@ impl<G: gs::GaussianPod> SceneResource<G> {
             query_cursor,
             unedited_models,
             show_unedited_model: false,
+            mask_evaluator,
+            mask_gizmos,
         }
     }
 
@@ -2028,7 +2090,9 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         Self::add_model_with_viewer(
             &mut viewer,
             &mut self.unedited_models,
+            &mut self.mask_gizmos,
             render_state,
+            &self.mask_evaluator,
             key,
             count,
         );
@@ -2038,7 +2102,9 @@ impl<G: gs::GaussianPod> SceneResource<G> {
     fn add_model_with_viewer(
         viewer: &mut gs::MultiModelViewer<G>,
         unedited_models: &mut HashMap<String, UneditedModel>,
+        mask_gizmos: &mut HashMap<String, MaskGizmosResource>,
         render_state: &egui_wgpu::RenderState,
+        mask_evaluator: &gs::MaskEvaluator,
         key: String,
         count: usize,
     ) {
@@ -2055,6 +2121,15 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         );
         let unedited_model = UneditedModel::new(viewer, render_state, &gaussian_buffers);
 
+        mask_evaluator.evaluate(
+            &render_state.device,
+            &render_state.queue,
+            &gs::MaskOpTree::Reset,
+            &gaussian_buffers.mask_buffer,
+            &gaussian_buffers.model_transform_buffer,
+            &gaussian_buffers.gaussians_buffer,
+        );
+
         viewer.models.insert(
             key.clone(),
             gs::MultiModelViewerModel {
@@ -2062,7 +2137,33 @@ impl<G: gs::GaussianPod> SceneResource<G> {
                 bind_groups,
             },
         );
-        unedited_models.insert(key, unedited_model);
+        unedited_models.insert(key.clone(), unedited_model);
+        mask_gizmos.insert(
+            key,
+            MaskGizmosResource {
+                gizmo: gs::MaskGizmo::new_with(
+                    &render_state.device,
+                    render_state.target_format,
+                    &viewer.world_buffers.camera_buffer,
+                    Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                ),
+                box_gizmos: Vec::new(),
+                ellipsoid_gizmos: Vec::new(),
+            },
+        );
     }
 
     /// Remove a model.
@@ -2075,7 +2176,7 @@ impl<G: gs::GaussianPod> SceneResource<G> {
         self.viewer.lock().expect("viewer").remove_model(key);
     }
 
-    /// Update the measurement visible hit pair
+    /// Update the measurement visible hit pair.
     fn update_measurement_visible_hit_pairs(&mut self, hit_pairs: &[app::MeasurementHitPair]) {
         self.measurement_visible_hit_pairs.clear();
         self.measurement_visible_hit_pairs.extend(
@@ -2084,6 +2185,66 @@ impl<G: gs::GaussianPod> SceneResource<G> {
                 .filter(|hit_pair| hit_pair.visible)
                 .cloned(),
         );
+    }
+
+    /// Evaluate the mask given the op code.
+    fn evaluate_mask(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        op: Option<&app::GaussianSplattingMaskOp>,
+        key: &str,
+        model: &app::GaussianSplattingModel,
+    ) {
+        let viewer = self.viewer.lock().expect("viewer");
+        let gaussian_buffers = &viewer.models.get(key).expect("model").gaussian_buffers;
+
+        self.mask_evaluator.evaluate(
+            &render_state.device,
+            &render_state.queue,
+            &op.map(|op| op.to_tree(&model.mask.op_shape_pods))
+                .unwrap_or(gs::MaskOpTree::Reset),
+            &gaussian_buffers.mask_buffer,
+            &gaussian_buffers.model_transform_buffer,
+            &gaussian_buffers.gaussians_buffer,
+        );
+
+        let gizmo = self.mask_gizmos.get_mut(key).expect("gizmo");
+
+        gizmo.box_gizmos = model
+            .mask
+            .shapes
+            .iter()
+            .filter(|shape| shape.shape.kind == gs::MaskShapeKind::Box && shape.visible)
+            .map(|shape| shape.shape.to_mask_gizmo_pod())
+            .collect();
+
+        gizmo.ellipsoid_gizmos = model
+            .mask
+            .shapes
+            .iter()
+            .filter(|shape| shape.shape.kind == gs::MaskShapeKind::Ellipsoid && shape.visible)
+            .map(|shape| shape.shape.to_mask_gizmo_pod())
+            .collect();
+
+        if !gizmo.box_gizmos.is_empty() {
+            gizmo.gizmo.update(
+                &render_state.device,
+                &render_state.queue,
+                &viewer.world_buffers.camera_buffer,
+                gs::MaskShapeKind::Box,
+                &gizmo.box_gizmos,
+            );
+        }
+
+        if !gizmo.ellipsoid_gizmos.is_empty() {
+            gizmo.gizmo.update(
+                &render_state.device,
+                &render_state.queue,
+                &viewer.world_buffers.camera_buffer,
+                gs::MaskShapeKind::Ellipsoid,
+                &gizmo.ellipsoid_gizmos,
+            );
+        }
     }
 }
 
@@ -2115,8 +2276,25 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
             query_cursor,
             unedited_models,
             show_unedited_model,
+            mask_gizmos,
             ..
         } = callback_resources.get().expect("scene resource");
+
+        for key in self.model_render_keys.iter() {
+            let gizmo = mask_gizmos.get(key).expect("gizmo");
+
+            if !gizmo.box_gizmos.is_empty() {
+                gizmo.gizmo.render_box_with_pass(render_pass);
+            }
+
+            if !gizmo.ellipsoid_gizmos.is_empty() {
+                gizmo.gizmo.render_ellipsoid_with_pass(render_pass);
+            }
+        }
+
+        if !measurement_visible_hit_pairs.is_empty() {
+            measurement_renderer.render(render_pass, measurement_visible_hit_pairs.len() as u32);
+        }
 
         {
             let viewer = viewer.lock().expect("viewer");
@@ -2134,10 +2312,6 @@ impl<G: gs::GaussianPod + Send + Sync> egui_wgpu::CallbackTrait for SceneCallbac
                     &model.gaussian_buffers.indirect_args_buffer,
                 );
             }
-        }
-
-        if !measurement_visible_hit_pairs.is_empty() {
-            measurement_renderer.render(render_pass, measurement_visible_hit_pairs.len() as u32);
         }
 
         if let Query::Selection { .. } = self.query {

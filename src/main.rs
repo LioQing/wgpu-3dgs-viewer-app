@@ -9,6 +9,7 @@ fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let native_options = eframe::NativeOptions {
+        depth_buffer: 32,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])
             .with_min_inner_size([300.0, 220.0])
@@ -32,6 +33,7 @@ fn main() {
     eframe::WebLogger::init(log::LevelFilter::Debug).ok();
 
     let web_options = eframe::WebOptions {
+        depth_buffer: 32,
         wgpu_options: wgpu_configuration(),
         ..Default::default()
     };

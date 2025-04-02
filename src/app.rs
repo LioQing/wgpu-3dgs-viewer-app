@@ -450,6 +450,9 @@ pub enum SceneCommand {
 
     /// Update the measurement hit.
     UpdateMeasurementHit,
+
+    /// Update mask.
+    EvaluateMask(Option<GaussianSplattingMaskOp>),
 }
 
 impl std::fmt::Debug for SceneCommand {
@@ -458,6 +461,7 @@ impl std::fmt::Debug for SceneCommand {
             Self::AddModel { .. } => write!(f, "AddModel"),
             Self::RemoveModel(_) => write!(f, "RemoveModel"),
             Self::UpdateMeasurementHit => write!(f, "UpdateMeasurementHit"),
+            Self::EvaluateMask(_) => write!(f, "EvaluateMasking"),
         }
     }
 }
@@ -860,6 +864,9 @@ pub struct GaussianSplattingModel {
     /// The transform.
     pub transform: GaussianSplattingModelTransform,
 
+    /// The mask.
+    pub mask: GaussianSplattingMask,
+
     /// The center of the bounding box.
     pub center: Vec3,
 
@@ -878,6 +885,7 @@ impl GaussianSplattingModel {
             file_name,
             gaussians,
             transform: GaussianSplattingModelTransform::new(),
+            mask: GaussianSplattingMask::new(),
             center: Vec3::ZERO,
             visible: true,
         }
@@ -1410,5 +1418,272 @@ impl SelectionEdit {
 impl Default for SelectionEdit {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The mask.
+#[derive(Debug, Clone)]
+pub struct GaussianSplattingMask {
+    /// The mask shapes.
+    pub shapes: Vec<GaussianSplattingMaskShape>,
+
+    /// The operation shape PODs.
+    pub op_shape_pods: Vec<gs::MaskOpShapePod>,
+
+    /// The operations code.
+    pub op_code: String,
+}
+
+impl GaussianSplattingMask {
+    /// Create a new Gaussian splatting mask.
+    pub fn new() -> Self {
+        Self {
+            shapes: Vec::new(),
+            op_shape_pods: Vec::new(),
+            op_code: String::new(),
+        }
+    }
+
+    /// Update the PODs.
+    pub fn update_pods(&mut self) {
+        self.op_shape_pods = self
+            .shapes
+            .iter()
+            .map(|shape| shape.shape.to_mask_op_shape_pod())
+            .collect();
+    }
+}
+
+/// The mask shape.
+#[derive(Debug, Clone)]
+pub struct GaussianSplattingMaskShape {
+    /// The shape.
+    pub shape: gs::MaskShape,
+
+    /// The euler rotation.
+    pub rot: Vec3,
+
+    /// Whether the shape is visible.
+    pub visible: bool,
+}
+
+impl GaussianSplattingMaskShape {
+    /// Create a new Gaussian splatting mask shape.
+    pub fn new() -> Self {
+        Self {
+            shape: gs::MaskShape::new(gs::MaskShapeKind::Box),
+            rot: Vec3::ZERO,
+            visible: true,
+        }
+    }
+}
+
+impl Default for GaussianSplattingMaskShape {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The syntax tree representing the mask operation.
+#[derive(Debug, Clone)]
+pub enum GaussianSplattingMaskOp {
+    /// Union.
+    Union(Box<GaussianSplattingMaskOp>, Box<GaussianSplattingMaskOp>),
+
+    /// Intersection.
+    Intersection(Box<GaussianSplattingMaskOp>, Box<GaussianSplattingMaskOp>),
+
+    /// Difference.
+    Difference(Box<GaussianSplattingMaskOp>, Box<GaussianSplattingMaskOp>),
+
+    /// Symmetric difference.
+    SymmetricDifference(Box<GaussianSplattingMaskOp>, Box<GaussianSplattingMaskOp>),
+
+    /// Complement.
+    Complement(Box<GaussianSplattingMaskOp>),
+
+    /// Shape.
+    Shape(usize),
+}
+
+impl GaussianSplattingMaskOp {
+    /// Parse from a string.
+    pub fn parse(input: &str) -> Result<Option<Self>, String> {
+        use nom::{
+            Finish, IResult, Parser,
+            branch::alt,
+            character::complete::{char, digit1, space0},
+            combinator::{all_consuming, map, map_res},
+            multi::separated_list1,
+            sequence::{delimited, preceded},
+        };
+
+        // Parse a shape (just a number)
+        fn parse_shape(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            map(
+                map_res(digit1, str::parse::<usize>),
+                GaussianSplattingMaskOp::Shape,
+            )
+            .parse(input)
+        }
+
+        // Parse a term in parentheses
+        fn parse_paren(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            delimited(
+                delimited(space0, char('('), space0),
+                parse_expr,
+                delimited(space0, char(')'), space0),
+            )
+            .parse(input)
+        }
+
+        // Parse a complement expression (!X)
+        fn parse_complement(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            map(
+                preceded(delimited(space0, char('!'), space0), parse_factor),
+                |op| GaussianSplattingMaskOp::Complement(Box::new(op)),
+            )
+            .parse(input)
+        }
+
+        // Parse a factor (shape, paren, or complement)
+        fn parse_factor(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            delimited(
+                space0,
+                alt((parse_shape, parse_paren, parse_complement)),
+                space0,
+            )
+            .parse(input)
+        }
+
+        // Parse symmetric difference with ^ operator
+        fn parse_symmetric_difference(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            let (input, items) =
+                separated_list1(delimited(space0, char('^'), space0), parse_factor).parse(input)?;
+
+            let mut iter = items.into_iter();
+            let initial = iter.next().unwrap();
+            let result = iter.fold(initial, |acc, val| {
+                GaussianSplattingMaskOp::SymmetricDifference(Box::new(acc), Box::new(val))
+            });
+
+            Ok((input, result))
+        }
+
+        // Parse difference with - operator
+        fn parse_difference(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            let (input, items) = separated_list1(
+                delimited(space0, char('-'), space0),
+                parse_symmetric_difference,
+            )
+            .parse(input)?;
+
+            let mut iter = items.into_iter();
+            let initial = iter.next().unwrap();
+            let result = iter.fold(initial, |acc, val| {
+                GaussianSplattingMaskOp::Difference(Box::new(acc), Box::new(val))
+            });
+
+            Ok((input, result))
+        }
+
+        // Parse intersection with & operator
+        fn parse_intersection(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            let (input, items) =
+                separated_list1(delimited(space0, char('&'), space0), parse_difference)
+                    .parse(input)?;
+
+            let mut iter = items.into_iter();
+            let initial = iter.next().unwrap();
+            let result = iter.fold(initial, |acc, val| {
+                GaussianSplattingMaskOp::Intersection(Box::new(acc), Box::new(val))
+            });
+
+            Ok((input, result))
+        }
+
+        // Parse union with | operator
+        fn parse_union(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            let (input, items) =
+                separated_list1(delimited(space0, char('|'), space0), parse_intersection)
+                    .parse(input)?;
+
+            let mut iter = items.into_iter();
+            let initial = iter.next().unwrap();
+            let result = iter.fold(initial, |acc, val| {
+                GaussianSplattingMaskOp::Union(Box::new(acc), Box::new(val))
+            });
+
+            Ok((input, result))
+        }
+
+        // Parse the main expression
+        fn parse_expr(input: &str) -> IResult<&str, GaussianSplattingMaskOp> {
+            parse_union(input)
+        }
+
+        if input.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // Apply the main parser and convert the result
+        match all_consuming(parse_expr).parse(input.trim()).finish() {
+            Ok((_, op)) => Ok(Some(op)),
+            Err(e) => Err(format!("Failed to parse mask operation: {e}")),
+        }
+    }
+
+    /// Validate shape indices.
+    pub fn validate_shapes(&self, shape_count: usize) -> Result<(), usize> {
+        match self {
+            Self::Union(left, right) => {
+                left.validate_shapes(shape_count)?;
+                right.validate_shapes(shape_count)
+            }
+            Self::Intersection(left, right) => {
+                left.validate_shapes(shape_count)?;
+                right.validate_shapes(shape_count)
+            }
+            Self::Difference(left, right) => {
+                left.validate_shapes(shape_count)?;
+                right.validate_shapes(shape_count)
+            }
+            Self::SymmetricDifference(left, right) => {
+                left.validate_shapes(shape_count)?;
+                right.validate_shapes(shape_count)
+            }
+            Self::Complement(op) => op.validate_shapes(shape_count),
+            Self::Shape(index) => {
+                if *index >= shape_count {
+                    Err(*index)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Create a [`gs::MaskOpTree`] from the operation.
+    pub fn to_tree<'a>(&self, shapes: &'a [gs::MaskOpShapePod]) -> gs::MaskOpTree<'a> {
+        match self {
+            Self::Union(left, right) => gs::MaskOpTree::Union(
+                Box::new(left.to_tree(shapes)),
+                Box::new(right.to_tree(shapes)),
+            ),
+            Self::Intersection(left, right) => gs::MaskOpTree::Intersection(
+                Box::new(left.to_tree(shapes)),
+                Box::new(right.to_tree(shapes)),
+            ),
+            Self::Difference(left, right) => gs::MaskOpTree::Difference(
+                Box::new(left.to_tree(shapes)),
+                Box::new(right.to_tree(shapes)),
+            ),
+            Self::SymmetricDifference(left, right) => gs::MaskOpTree::SymmetricDifference(
+                Box::new(left.to_tree(shapes)),
+                Box::new(right.to_tree(shapes)),
+            ),
+            Self::Complement(op) => gs::MaskOpTree::Complement(Box::new(op.to_tree(shapes))),
+            Self::Shape(index) => gs::MaskOpTree::Shape(&shapes[*index]),
+        }
     }
 }

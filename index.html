@@ -69,23 +69,35 @@
       body {
         /* Light mode background color for what is not covered by the egui canvas,
             or where the egui canvas is translucent. */
-        background: #909090;
+        background: #c0c0c0;
+
+        a {
+          color: #0000ff;
+        }
+
+        a:visited {
+          color: #8800ff;
+        }
       }
 
       @media (prefers-color-scheme: dark) {
         body {
           /* Dark mode background color for what is not covered by the egui canvas,
                 or where the egui canvas is translucent. */
-          background: #404040;
+          background: #202020;
+
+          a {
+            color: #6666ff;
+          }
+
+          a:visited {
+            color: #cc66ff;
+          }
+
+          .centered {
+            color: #f0f0f0;
+          }
         }
-      }
-
-      a {
-        color: #00f;
-      }
-
-      a:visited {
-        color: #8800ff;
       }
 
       /* Allow canvas to fill entire web page: */
@@ -118,7 +130,7 @@
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        color: #f0f0f0;
+        color: #000000;
         font-size: 24px;
         font-family: Ubuntu-Light, Helvetica, sans-serif;
         text-align: center;

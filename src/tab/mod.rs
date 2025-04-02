@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use strum::{EnumCount, EnumIter, IntoEnumIterator};
 
 mod camera;
+mod mask;
 mod measurement;
 mod metadata;
 mod models;
@@ -12,6 +13,7 @@ mod transform;
 
 use crate::app;
 use camera::Camera;
+use mask::Mask;
 use measurement::Measurement;
 use metadata::Metadata;
 use models::Models;
@@ -40,6 +42,7 @@ pub enum Type {
     Selection,
     Metadata,
     Models,
+    Mask,
 }
 
 impl Type {
@@ -53,6 +56,7 @@ impl Type {
             Self::Selection => "Selection",
             Self::Metadata => "Metadata",
             Self::Models => "Models",
+            Self::Mask => "Mask",
         }
     }
 }
@@ -76,12 +80,12 @@ impl Manager {
         let [_, inspector] = dock_state.main_surface_mut().split_right(
             egui_dock::NodeIndex::root(),
             0.7,
-            vec![Type::Transform, Type::Camera],
+            vec![Type::Transform, Type::Mask],
         );
         let [_, _] = dock_state.main_surface_mut().split_below(
             inspector,
             0.5,
-            vec![Type::Models, Type::Selection, Type::Measurement],
+            vec![Type::Models, Type::Camera, Type::Selection],
         );
 
         let tabs = HashMap::new();
@@ -196,6 +200,7 @@ impl Viewer<'_> {
             Type::Selection => Box::new(Selection::create(self.state)) as Box<dyn Tab>,
             Type::Metadata => Box::new(Metadata::create(self.state)) as Box<dyn Tab>,
             Type::Models => Box::new(Models::create(self.state)) as Box<dyn Tab>,
+            Type::Mask => Box::new(Mask::create(self.state)) as Box<dyn Tab>,
         });
     }
 }
