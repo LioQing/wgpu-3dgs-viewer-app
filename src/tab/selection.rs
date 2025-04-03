@@ -100,7 +100,7 @@ impl Tab for Selection {
 
             ui.horizontal(|ui| {
                 match action {
-                    Some(app::Action::Selection { .. }) => {
+                    Some(app::Action::Selection) => {
                         if ui.button("Selecting...").clicked() {
                             *action = None;
                             selection.edit = None;
