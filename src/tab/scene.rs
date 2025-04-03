@@ -1163,7 +1163,7 @@ impl SceneInput {
                         .expect("send gs");
                 }
             }
-            None | Some(app::Action::Selection { .. }) => {}
+            None | Some(app::Action::Selection) => {}
         }
 
         // Do action
