@@ -26,6 +26,9 @@ pub struct App {
 impl App {
     /// Create a main application.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        Self::apple_silicon_crash_warning();
+
         if let Some(storage) = cc.storage {
             return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
         }
@@ -56,6 +59,36 @@ impl App {
             .expect("the_canvas_id")
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("the_canvas_id to be a HtmlCanvasElement")
+    }
+
+    /// Apple silicon crash warning.
+    ///
+    /// This is only available on macOS.
+    #[cfg(target_arch = "wasm32")]
+    pub fn apple_silicon_crash_warning() {
+        let window = web_sys::window().expect("window");
+        log::warn!(
+            "TEST {}",
+            window
+                .navigator()
+                .user_agent()
+                .unwrap_or_default()
+                .to_lowercase()
+        );
+        if window
+            .navigator()
+            .user_agent()
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("mac")
+        {
+            window
+                .alert_with_message(
+                    "Apple Silicon has been known to crash when using this app due to bug in wgpu. \
+                    Please do not use this app on Apple Silicon.",
+                )
+                .ok();
+        }
     }
 
     /// Create the menu bar.
