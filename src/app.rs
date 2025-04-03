@@ -555,16 +555,49 @@ impl GaussianSplatting {
     }
 }
 
+/// The download receiver of [`ExportStage::Edits`].
+#[derive(Debug)]
+pub enum ExportDownloadReceiver<T> {
+    /// Waiting for download.
+    Downloading(oneshot::Receiver<Vec<T>>),
+
+    /// Downloaded.
+    Downloaded(Vec<T>),
+}
+
+impl<T> ExportDownloadReceiver<T> {
+    /// Create a new downloading receiver.
+    pub fn new(rx: oneshot::Receiver<Vec<T>>) -> Self {
+        Self::Downloading(rx)
+    }
+
+    /// Try to receive the downloaded data.
+    pub fn try_recv(&mut self) {
+        match self {
+            Self::Downloading(rx) => {
+                if let Ok(data) = rx.try_recv() {
+                    *self = Self::Downloaded(data);
+                }
+            }
+            Self::Downloaded(_) => {}
+        }
+    }
+}
+
 /// The stages of export.
 #[derive(Debug)]
 pub enum ExportStage {
-    /// Waiting for edits download.
-    Edits(oneshot::Receiver<Vec<Vec<gs::GaussianEditPod>>>),
+    /// Waiting for edit and mask downloads.
+    Downloads {
+        edits: ExportDownloadReceiver<Vec<gs::GaussianEditPod>>,
+        masks: ExportDownloadReceiver<Vec<u32>>,
+    },
 
     /// Waiting for save location.
     Save {
         rx: oneshot::Receiver<Option<rfd::FileHandle>>,
         edits: Vec<Vec<gs::GaussianEditPod>>,
+        masks: Vec<Vec<u32>>,
     },
 }
 
@@ -623,7 +656,7 @@ impl ExportModal {
                 .striped(true)
                 .resizable(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .columns(egui_extras::Column::auto(), 3)
+                .columns(egui_extras::Column::auto(), 4)
                 .min_scrolled_height(0.0)
                 .max_scroll_height(available_height)
                 .header(20.0, |mut header| {
@@ -647,6 +680,15 @@ impl ExportModal {
                         }
                         ui.strong("Edit");
                     });
+                    header.col(|ui| {
+                        let mut all_mask = self.settings.iter().all(|s| s.mask);
+                        if ui.checkbox(&mut all_mask, "").clicked() {
+                            for s in &mut self.settings {
+                                s.mask = all_mask;
+                            }
+                        }
+                        ui.strong("Mask");
+                    });
                 })
                 .body(|body| {
                     body.rows(text_height, models.len(), |mut row| {
@@ -666,14 +708,22 @@ impl ExportModal {
                         row.col(|ui| {
                             ui.checkbox(&mut setting.edit, "");
                         });
+
+                        row.col(|ui| {
+                            ui.checkbox(&mut setting.mask, "");
+                        });
                     });
                 });
             ui.label("");
 
             ui.horizontal(|ui| {
                 if ui.button("Confirm").clicked() {
-                    let (tx, rx) = oneshot::channel();
-                    self.stage = Some(ExportStage::Edits(rx));
+                    let (edits_tx, edits_rx) = oneshot::channel();
+                    let (masks_tx, masks_rx) = oneshot::channel();
+                    self.stage = Some(ExportStage::Downloads {
+                        edits: ExportDownloadReceiver::new(edits_rx),
+                        masks: ExportDownloadReceiver::new(masks_rx),
+                    });
 
                     let render_state = frame.wgpu_render_state().expect("render state");
                     let renderer = render_state.renderer.read();
@@ -683,32 +733,53 @@ impl ExportModal {
 
                     let device = render_state.device.clone();
                     let queue = render_state.queue.clone();
-                    let edit_buffers = models_ordered
+                    let (edit_buffers, mask_buffers): (Vec<_>, Vec<_>) = models_ordered
                         .iter()
                         .map(|(k, _)| {
-                            viewer
-                                .models
-                                .get(*k)
-                                .expect("model")
-                                .gaussian_buffers
-                                .gaussians_edit_buffer
-                                .clone()
-                        })
-                        .collect::<Vec<_>>();
+                            let gaussian_buffers =
+                                &viewer.models.get(*k).expect("model").gaussian_buffers;
 
+                            (
+                                gaussian_buffers.gaussians_edit_buffer.clone(),
+                                gaussian_buffers.mask_buffer.clone(),
+                            )
+                        })
+                        .unzip();
+
+                    // Download edits
+                    {
+                        let device = device.clone();
+                        let queue = queue.clone();
+                        util::exec_task(async move {
+                            let mut edits = Vec::with_capacity(edit_buffers.len());
+                            for buffer in edit_buffers {
+                                match buffer.download(&device, &queue).await {
+                                    Ok(edit) => edits.push(edit),
+                                    Err(e) => {
+                                        log::error!("Download edit buffer: {e}");
+                                        edits.push(Vec::new());
+                                    }
+                                }
+                            }
+
+                            edits_tx.send(edits).expect("send edits");
+                        });
+                    }
+
+                    // Download masks
                     util::exec_task(async move {
-                        let mut edits = Vec::with_capacity(edit_buffers.len());
-                        for buffer in edit_buffers {
+                        let mut masks = Vec::with_capacity(mask_buffers.len());
+                        for buffer in mask_buffers {
                             match buffer.download(&device, &queue).await {
-                                Ok(edit) => edits.push(edit),
+                                Ok(mask) => masks.push(mask),
                                 Err(e) => {
-                                    log::error!("Download edit buffer: {e}");
-                                    edits.push(Vec::new());
+                                    log::error!("Download mask buffer: {e}");
+                                    masks.push(Vec::new());
                                 }
                             }
                         }
 
-                        tx.send(edits).expect("send edits");
+                        masks_tx.send(masks).expect("send masks");
                     });
                 }
 
@@ -719,8 +790,20 @@ impl ExportModal {
         });
 
         match &self.stage {
-            Some(ExportStage::Edits(rx)) => {
-                if let Ok(edits) = rx.try_recv() {
+            Some(ExportStage::Downloads { .. }) => {
+                let Some(ExportStage::Downloads { edits, masks }) = &mut self.stage else {
+                    // Variant of stage has been matched
+                    unreachable!()
+                };
+
+                edits.try_recv();
+                masks.try_recv();
+
+                if let (
+                    ExportDownloadReceiver::Downloaded(edits),
+                    ExportDownloadReceiver::Downloaded(..),
+                ) = (edits, masks)
+                {
                     let task = rfd::AsyncFileDialog::new()
                         .set_title("Save the exported models")
                         .set_file_name(match edits.len() {
@@ -733,7 +816,17 @@ impl ExportModal {
                         .save_file();
 
                     let (tx, rx) = oneshot::channel();
-                    self.stage = Some(ExportStage::Save { rx, edits });
+
+                    let Some(ExportStage::Downloads {
+                        edits: ExportDownloadReceiver::Downloaded(edits),
+                        masks: ExportDownloadReceiver::Downloaded(masks),
+                    }) = std::mem::take(&mut self.stage)
+                    else {
+                        // Variant of stage has been matched
+                        unreachable!()
+                    };
+
+                    self.stage = Some(ExportStage::Save { rx, edits, masks });
 
                     util::exec_task(async move {
                         let file = task.await;
@@ -741,11 +834,16 @@ impl ExportModal {
                     });
                 }
             }
-            Some(ExportStage::Save { rx, edits }) => {
+            Some(ExportStage::Save { rx, edits, masks }) => {
                 if let Ok(Some(file)) = rx.try_recv() {
                     let mut cursor = Cursor::new(Vec::new());
-                    self.export_models(&mut cursor, models_ordered.iter().map(|(_, m)| *m), edits)
-                        .expect("export models");
+                    self.export_models(
+                        &mut cursor,
+                        models_ordered.iter().map(|(_, m)| *m),
+                        edits,
+                        masks,
+                    )
+                    .expect("export models");
 
                     util::exec_task(async move {
                         if let Err(e) = file.write(cursor.into_inner().as_slice()).await {
@@ -768,6 +866,7 @@ impl ExportModal {
         writer: &mut W,
         models: impl IntoIterator<Item = &'a GaussianSplattingModel>,
         edits: &[Vec<gs::GaussianEditPod>],
+        masks: &[Vec<u32>],
     ) -> Result<(), String> {
         if edits.len() == 1 {
             return models
@@ -775,7 +874,11 @@ impl ExportModal {
                 .next()
                 .expect("model")
                 .gaussians
-                .write_ply(writer, Some(&edits[0]))
+                .write_ply(
+                    writer,
+                    self.settings[0].edit.then_some(&edits[0]),
+                    self.settings[0].mask.then_some(masks[0].iter().copied()),
+                )
                 .map_err(|e| e.to_string());
         }
 
@@ -784,17 +887,26 @@ impl ExportModal {
             .compression_method(zip::CompressionMethod::Deflated)
             .large_file(true);
 
-        itertools::multizip((models.into_iter(), self.settings.iter(), edits.iter()))
-            .filter(|(_, s, _)| s.export)
-            .try_for_each(|(model, setting, edit)| {
-                zip.start_file(model.file_name.clone(), options)
-                    .map_err(|e| e.to_string())?;
+        itertools::multizip((
+            models.into_iter(),
+            self.settings.iter(),
+            edits.iter(),
+            masks.iter(),
+        ))
+        .filter(|(_, s, _, _)| s.export)
+        .try_for_each(|(model, setting, edit, mask)| {
+            zip.start_file(model.file_name.clone(), options)
+                .map_err(|e| e.to_string())?;
 
-                model
-                    .gaussians
-                    .write_ply(&mut zip, setting.edit.then_some(edit))
-                    .map_err(|e| e.to_string())
-            })?;
+            model
+                .gaussians
+                .write_ply(
+                    &mut zip,
+                    setting.edit.then_some(edit),
+                    setting.mask.then_some(mask.iter().copied()),
+                )
+                .map_err(|e| e.to_string())
+        })?;
 
         zip.finish().map_err(|e| e.to_string())?;
 
@@ -810,6 +922,9 @@ pub struct ExportSettings {
 
     /// Apply the edit or not.
     pub edit: bool,
+
+    /// Apply the mask or not.
+    pub mask: bool,
 }
 
 impl ExportSettings {
@@ -818,6 +933,7 @@ impl ExportSettings {
         Self {
             export: true,
             edit: true,
+            mask: true,
         }
     }
 }
