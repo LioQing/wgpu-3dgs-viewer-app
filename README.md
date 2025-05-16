@@ -2,25 +2,30 @@
 
 ...written in Rust using [wgpu](https://wgpu.rs/) and [egui](https://www.egui.rs/).
 
-[![Github Pages](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml) [![CI](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml)
+[![Github Pages](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/pages.yml) [![CI](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml/badge.svg)](https://github.com/LioQing/wgpu-3dgs-viewer-app/actions/workflows/rust.yml) ![License](https://img.shields.io/github/license/lioqing/wgpu-3dgs-viewer-app
+)
 
 ## Getting started
 
 This viewer app is built for [3D Gaussian Splatting](https://en.wikipedia.org/wiki/Gaussian_splatting). It supports the PLY file format from the [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) research paper.
 
-The viewer implementation can be found at [wgpu-3dgs-viewer](https://github.com/LioQing/wgpu-3dgs-viewer). The app uses [wgpu](https://wgpu.rs/), the Rust implementation of [WebGPU](https://en.wikipedia.org/wiki/WebGPU), to render the model, so it supports most of the GPU backends.
-
 > [!NOTE]
 >
-> To use the web version, you need a browser that supports WebGPU. Please refer to the [WebGPU Implementation Status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) for more information.
->
-> You may also run the app natively, see [Native](#native) below.
+>The core of this app is a rendering crate for 3D Gaussian splatting, [wgpu-3dgs-viewer](https://github.com/LioQing/wgpu-3dgs-viewer)! The crate uses [wgpu](https://wgpu.rs/), the Rust implementation of [WebGPU](https://en.wikipedia.org/wiki/WebGPU), to render the model, so it supports most of the GPU backends.
 
 ### Running the app
 
 #### Web
 
 You can run the app on the web by visiting [https://lioqing.com/wgpu-3dgs-viewer-app/](https://lioqing.com/wgpu-3dgs-viewer-app/).
+
+> [!NOTE]
+>
+> To use the web version, you need a browser that supports WebGPU. Please refer to the [WebGPU Implementation Status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) for more information.
+
+> [!WARNING]
+>
+> Apple Silicon is found to crash when trying to render models in the web version, use the [native version](#native) instead.
 
 #### Native
 
